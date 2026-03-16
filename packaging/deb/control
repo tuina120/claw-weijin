@@ -1,0 +1,12 @@
+Package: openclaw
+Version: __VERSION__
+Section: net
+Priority: optional
+Architecture: __ARCH__
+Maintainer: OpenClaw Maintainers <maintainers@openclaw.local>
+Depends: nodejs (>= 20), systemd
+Installed-Size: __INSTALLED_SIZE__
+Description: OpenClaw web console (models/chat/files/ssh)
+ OpenClaw is an all-in-one self-hosted web console:
+ model config, chat page, file manager, upload center,
+ SSH tools, integrations, and VPN convert/subscription pages.

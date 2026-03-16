@@ -1,0 +1,22 @@
+node_modules/
+.openclaw/
+workspace/
+
+# local runtime / temp
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+nano.*.save
+
+# secrets
+bridge.config.json
+*.env
+.env*
+*.pem
+*.key
+
+# build artifacts
+dist/*
+!dist/openclaw_*.deb

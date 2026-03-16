@@ -1,0 +1,19 @@
+[Unit]
+Description=OpenClaw Bridge Service (Telegram/Feishu)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__PROJECT_DIR__
+Environment=NODE_ENV=production
+EnvironmentFile=__ENV_FILE__
+ExecStart=/usr/bin/env node bridge.js
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillSignal=SIGINT
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,13 @@
+{
+  "name": "openclaw-model-console",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenClaw 多模型中文网页配置台。",
+  "scripts": {
+    "start": "node server.js",
+    "bridge": "node bridge.js"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  }
+}

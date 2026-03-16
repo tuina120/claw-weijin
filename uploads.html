@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenClaw 上传中心</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Noto+Sans+SC:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./uploads.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="header">
+        <div>
+          <p class="tag">OpenClaw NAS</p>
+          <h1>上传中心</h1>
+          <p class="sub">此页面专注上传，文件会自动按扩展名（如 `txt`、`run`、`yaml`）分类存放。</p>
+        </div>
+        <div class="header-links">
+          <a class="back-link" href="./services.html">返回导航页</a>
+        </div>
+      </header>
+
+      <section class="panel panel-meta">
+        <div class="meta-item"><span>当前用户</span><strong id="current-user">加载中...</strong></div>
+        <div class="meta-item"><span>共享目录</span><strong id="share-root">加载中...</strong></div>
+        <div class="meta-item"><span>上传策略</span><strong id="upload-limit">加载中...</strong></div>
+      </section>
+
+      <section class="panel">
+        <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="拖拽上传区域">
+          <p class="drop-title">拖拽文件到这里上传</p>
+          <p class="drop-sub">支持多文件批量上传，或点击选择文件</p>
+          <p id="drop-hint" class="drop-hint"></p>
+          <label class="btn btn-primary upload-btn">
+            选择文件上传
+            <input id="upload-input" type="file" multiple />
+          </label>
+        </div>
+        <p id="status" class="status">状态：准备就绪</p>
+        <div id="upload-progress-panel" class="upload-progress-panel" hidden>
+          <div class="progress-head">
+            <span id="progress-label">上传进度</span>
+            <strong id="progress-percent">0%</strong>
+          </div>
+          <div class="progress-track" aria-hidden="true">
+            <div id="progress-fill" class="progress-fill"></div>
+          </div>
+          <p id="progress-detail" class="progress-detail">0 B / 0 B</p>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="result-head">
+          <h2>上传结果</h2>
+          <button id="clear-result-btn" class="btn btn-ghost btn-sm">清空记录</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>文件名</th>
+              <th>大小</th>
+              <th>结果</th>
+              <th>存储路径</th>
+            </tr>
+          </thead>
+          <tbody id="result-body"></tbody>
+        </table>
+      </section>
+    </main>
+
+    <script src="./uploads.js"></script>
+  </body>
+</html>

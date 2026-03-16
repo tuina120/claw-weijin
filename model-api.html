@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenClaw codex模型</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Noto+Sans+SC:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./model-api.css" />
+  </head>
+  <body>
+    <div class="shape shape-left"></div>
+    <div class="shape shape-right"></div>
+
+    <header class="hero">
+      <div>
+        <p class="hero-tag">MODEL API ACCESS</p>
+        <h1>codex模型</h1>
+        <p class="hero-sub">专注填写 API 请求地址与 API Key，快速完成模型接入。</p>
+      </div>
+      <div class="hero-actions">
+        <a href="./services.html" class="btn btn-soft">返回导航页</a>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>一键接入（仅 Base URL + API Key）</h2>
+        </div>
+        <div class="grid two quick-grid">
+          <label class="wide">
+            Base URL
+            <input id="quick-base-url" type="url" placeholder="https://right.codes/codex/v1" />
+          </label>
+          <label class="wide">
+            API Key
+            <input id="quick-api-key" type="password" autocomplete="off" placeholder="sk-..." />
+          </label>
+        </div>
+        <div class="tool-row quick-actions">
+          <button id="quick-create-btn" class="btn btn-primary" type="button">一键接入并设默认</button>
+          <button id="quick-fill-current-btn" class="btn btn-ghost" type="button">使用当前表单值</button>
+          <span id="quick-result" class="quick-result">结果：待执行</span>
+        </div>
+        <p class="tip">
+          逻辑：自动识别提供商 → 拉取模型列表 → 选择推荐模型 → 自动创建并设为默认。
+        </p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>快速接入</h2>
+          <div class="head-actions">
+            <button id="reload-btn" class="btn btn-ghost" type="button">重新加载</button>
+            <button id="save-btn" class="btn btn-primary" type="button">保存配置</button>
+          </div>
+        </div>
+
+        <div class="grid two">
+          <label>
+            已保存模型
+            <div class="inline-row">
+              <select id="profile-select"></select>
+              <button id="new-btn" class="btn btn-ghost" type="button">新建</button>
+            </div>
+          </label>
+          <label>
+            名称
+            <input id="name" type="text" placeholder="例如：RightCodes 主账号" />
+          </label>
+          <label>
+            提供商
+            <select id="provider"></select>
+          </label>
+          <label>
+            模型 ID
+            <input id="model" type="text" placeholder="例如：gpt-5.2" />
+          </label>
+          <label class="wide">
+            API 请求地址（Base URL）
+            <input id="base-url" type="url" placeholder="https://api.openai.com/v1" />
+          </label>
+          <label class="wide">
+            API Key
+            <div class="inline-row">
+              <input id="api-key" type="password" autocomplete="off" placeholder="sk-..." />
+              <button id="toggle-key-btn" class="btn btn-ghost" type="button">显示</button>
+            </div>
+          </label>
+          <label>
+            温度参数
+            <input id="temperature" type="number" min="0" max="2" step="0.1" />
+          </label>
+          <label>
+            最大 Token
+            <input id="max-tokens" type="number" min="1" step="1" />
+          </label>
+          <label>
+            Top P
+            <input id="top-p" type="number" min="0" max="1" step="0.05" />
+          </label>
+          <label class="switch-row">
+            <input id="set-default" type="checkbox" />
+            设为默认模型
+          </label>
+        </div>
+
+        <div class="tool-row">
+          <button id="discover-btn" class="btn btn-ghost" type="button">拉取模型列表</button>
+          <button id="test-btn" class="btn btn-accent" type="button">模型连通性测试</button>
+          <select id="model-candidates" aria-label="可用模型列表">
+            <option value="">可用模型（先点击“拉取模型列表”）</option>
+          </select>
+        </div>
+
+        <p class="tip">
+          提示：本页面保存到服务端模型配置文件，`chat.html` 会直接读取。`Ollama` 可不填 API Key。
+        </p>
+        <p id="path-text" class="path-text">配置路径：-</p>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span id="status-text">状态：就绪</span>
+    </footer>
+
+    <script src="./model-api.js"></script>
+  </body>
+</html>

@@ -1,0 +1,16 @@
+[Unit]
+Description=OpenClaw Cloudflare Tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__CLOUDFLARED_BIN__ tunnel --config __CONFIG_FILE__ --edge-ip-version auto --compression-quality 0 run
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillSignal=SIGINT
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

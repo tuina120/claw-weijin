@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenClaw</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Noto+Sans+SC:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <!-- cache bust: Cloudflare Access/Tunnel 环境下浏览器可能会缓存旧 CSS，导致布局错位 -->
+    <link rel="stylesheet" href="./chat.css?v=20260310-12" />
+  </head>
+  <body class="chat-body">
+    <header class="chat-header">
+      <div>
+        <p class="chat-tag">LOCAL CHAT</p>
+        <h1>OpenClaw</h1>
+      </div>
+      <div class="chat-header-actions">
+        <a class="header-link" href="./services.html">返回导航页</a>
+        <button id="new-project-btn" class="btn btn-ghost" type="button">新建项目</button>
+        <button id="new-chat-btn" class="btn btn-ghost" type="button">新建对话</button>
+      </div>
+    </header>
+
+    <main class="chat-layout" id="chat-layout">
+      <section class="chat-panel chat-config" id="sidebar-panel">
+        <div class="project-section">
+          <div class="panel-head panel-head-inline">
+            <h2>项目会话</h2>
+            <button id="reload-projects-btn" class="btn btn-ghost" type="button">刷新项目</button>
+          </div>
+          <p class="project-current">
+            当前项目：<span id="active-project-name">未选择</span>
+          </p>
+          <div id="project-list" class="project-list"></div>
+          <button id="archived-toggle-btn" class="archived-toggle-btn" type="button">
+            归档项目（0）
+          </button>
+          <div id="archived-project-list" class="project-list archived-list is-collapsed"></div>
+        </div>
+
+        <div class="model-config-hidden">
+          <div class="panel-head">
+            <h2>模型设置</h2>
+          </div>
+
+          <label>
+            已保存配置
+            <div class="inline-row">
+              <select id="profile-select"></select>
+              <button id="reload-profiles-btn" class="btn btn-ghost" type="button">刷新</button>
+            </div>
+          </label>
+
+          <label>
+            提供商
+            <select id="provider"></select>
+          </label>
+          <label>
+            模型 ID
+            <input id="model" type="text" placeholder="例如 gpt-4o-mini" />
+          </label>
+          <label>
+            接口地址
+            <input id="baseUrl" type="url" placeholder="https://api.openai.com/v1" />
+          </label>
+          <label>
+            API 密钥
+            <input id="apiKey" type="password" autocomplete="off" placeholder="sk-..." />
+          </label>
+          <label>
+            温度参数（Temperature）
+            <input id="temperature" type="number" min="0" max="2" step="0.1" />
+          </label>
+          <label>
+            最大 Token 数
+            <input id="maxTokens" type="number" min="1" step="1" />
+          </label>
+          <label>
+            核采样（Top P）
+            <input id="topP" type="number" min="0" max="1" step="0.05" />
+          </label>
+          <label>
+            系统提示词（可选）
+            <textarea id="systemPrompt" rows="4" placeholder="你是一位严谨的助手..."></textarea>
+          </label>
+        </div>
+      </section>
+
+      <section class="chat-panel chat-main">
+        <div id="chat-messages" class="chat-messages"></div>
+        <div class="chat-scroll-controls" aria-label="对话滚动控制">
+          <button id="scroll-up-btn" class="scroll-btn" type="button" title="向上滚动">↑</button>
+          <button id="scroll-down-btn" class="scroll-btn" type="button" title="向下滚动">↓</button>
+        </div>
+        <div class="composer">
+          <div class="composer-top">
+            <input id="file-input" type="file" multiple hidden />
+            <div class="composer-row">
+              <button id="add-file-btn" class="btn btn-ghost" type="button">加入文件</button>
+              <button id="new-project-inline-btn" class="btn btn-ghost" type="button">新建项目</button>
+              <div class="inline-model-picker">
+                <label for="composer-profile-select">配置</label>
+                <select id="composer-profile-select"></select>
+                <label for="composer-model-select">模型</label>
+                <select id="composer-model-select"></select>
+                <button id="composer-refresh-models-btn" class="btn btn-ghost" type="button">刷新</button>
+              </div>
+            </div>
+            <span class="composer-tip">支持文本类文件；自然语言任务会自动执行（也支持 `/run 命令`）</span>
+          </div>
+          <div id="pending-files" class="pending-files"></div>
+          <textarea
+            id="user-input"
+            rows="1"
+            placeholder="输入消息，可附带文件；Enter 发送，Shift+Enter 换行"
+          ></textarea>
+          <div class="composer-actions">
+            <span id="chat-status">状态：就绪</span>
+            <button id="send-btn" class="btn btn-primary" type="button">发送</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div id="project-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="project-modal-title">
+      <div class="modal-panel">
+        <div class="modal-head">
+          <h2 id="project-modal-title">新建本地项目</h2>
+          <button id="project-cancel-btn" class="btn btn-ghost" type="button">关闭</button>
+        </div>
+        <label>
+          项目名称
+          <input id="project-name-input" type="text" placeholder="例如 my-app" />
+        </label>
+        <label>
+          工作目录（仅允许 /home/weijin/codex/*）
+          <input id="project-parent-input" type="text" placeholder="/home/weijin/codex" />
+        </label>
+        <label>
+          模板
+          <select id="project-template-select">
+            <option value="basic">空项目（README）</option>
+            <option value="node">Node.js</option>
+            <option value="python">Python</option>
+          </select>
+        </label>
+        <p id="project-modal-status" class="modal-status">填写后点击“创建项目”。</p>
+        <div class="modal-actions">
+          <button id="project-create-btn" class="btn btn-primary" type="button">创建项目</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="./chat.js?v=20260310-12"></script>
+  </body>
+</html>

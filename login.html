@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenClaw 登录</title>
+    <link rel="stylesheet" href="/login.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="card">
+        <header class="head">
+          <div class="brand">
+            <div class="logo">OC</div>
+            <div class="meta">
+              <div class="title">OpenClaw</div>
+              <div class="sub">微软账号登录（MFA/一次性密码由微软登录页触发）</div>
+            </div>
+          </div>
+        </header>
+
+        <div class="status" id="status">正在检查登录配置...</div>
+
+        <div class="actions">
+          <button id="btn-login" class="btn primary" type="button">使用微软账号登录</button>
+          <button id="btn-device" class="btn" type="button">扫码登录</button>
+          <a id="btn-logout" class="btn ghost" href="/auth/logout">登出</a>
+        </div>
+
+        <section class="device" id="device-box" hidden>
+          <div class="device-row">
+            <div class="device-qr">
+              <img id="device-qr-img" alt="扫码登录二维码" />
+            </div>
+            <div class="device-meta">
+              <div class="device-title">扫码登录（设备码）</div>
+              <div class="device-sub">用手机扫码打开微软登录页，按提示完成登录。</div>
+              <div class="device-code">
+                <div class="device-code-label">验证码</div>
+                <div class="device-code-value" id="device-code">-</div>
+              </div>
+              <div class="device-links">
+                <a id="device-link" class="device-link" href="#" target="_blank" rel="noreferrer">打开登录链接</a>
+                <button id="device-cancel" class="btn ghost" type="button">取消</button>
+              </div>
+              <div class="device-status" id="device-status">等待扫码...</div>
+            </div>
+          </div>
+        </section>
+
+        <details class="help" id="help" hidden>
+          <summary>管理员配置</summary>
+          <div class="help-body">
+            <div class="hint">把以下内容写入 <code>~/.config/openclaw/ms.env</code>，然后重启服务。</div>
+            <pre class="code"><code id="help-code"></code></pre>
+            <div class="hint">systemd 用户服务重启命令：</div>
+            <pre class="code"><code>systemctl --user restart openclaw-web.service</code></pre>
+            <div class="hint">如果你是通过反向代理/域名访问，建议显式设置 <code>MS_REDIRECT_URI</code> 为实际回调地址。</div>
+            <div class="hint">
+              若要使用“扫码登录”，请在 Entra 应用中开启：
+              <code>Authentication</code> -> <code>Allow public client flows</code> = <code>Yes</code>。
+            </div>
+            <div class="hint">
+              白名单（可选）：只允许指定用户登录（邮箱/域名/租户/oid）。
+              <code>OPENCLAW_ALLOWED_EMAILS</code> / <code>OPENCLAW_ALLOWED_DOMAINS</code> / <code>OPENCLAW_ALLOWED_TENANTS</code> / <code>OPENCLAW_ALLOWED_OIDS</code>
+            </div>
+          </div>
+        </details>
+      </section>
+    </main>
+
+    <script src="/login.js"></script>
+  </body>
+</html>

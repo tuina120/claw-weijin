@@ -1,0 +1,23 @@
+{
+  "model": {
+    "provider": "openai",
+    "baseUrl": "https://www.right.codes/codex/v1",
+    "apiKey": "$RC_KEY",
+    "model": "gpt-5.2",
+    "systemPrompt": "你是一位严谨的助手，回答简洁且准确。",
+    "temperature": 0.7,
+    "maxTokens": 1024,
+    "topP": 1
+  },
+  "bot": {
+    "historyTurns": 12
+  },
+  "telegram": {
+    "enabled": true,
+    "botToken": "$TG_BOT_TOKEN",
+    "apiBase": "https://api.telegram.org",
+    "pollTimeoutSec": 20,
+    "pollIntervalMs": 1200,
+    "allowedChatIds": []
+  }
+}

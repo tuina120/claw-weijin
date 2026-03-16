@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>文件管理登录</title>
+    <link rel="stylesheet" href="/login.css" />
+    <link rel="stylesheet" href="/files-login.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="card">
+        <header class="head">
+          <div class="brand">
+            <div class="logo">FM</div>
+            <div class="meta">
+              <div class="title">文件管理独立登录</div>
+              <div class="sub">`files.html` / `uploads.html` 使用独立的邮件 + 密码，不再依赖微软登录。</div>
+            </div>
+          </div>
+        </header>
+
+        <div class="status" id="status">正在检查文件管理登录状态...</div>
+
+        <section id="files-login-box" class="auth-box" hidden>
+          <div class="box-title">登录文件管理</div>
+          <label class="field">
+            邮箱
+            <input id="login-email" type="email" autocomplete="username" placeholder="例如：you@example.com" />
+          </label>
+          <label class="field">
+            密码
+            <input id="login-password" type="password" autocomplete="current-password" placeholder="请输入密码" />
+          </label>
+          <div class="actions">
+            <button id="login-btn" class="btn primary" type="button">登录文件管理</button>
+          </div>
+        </section>
+
+        <section id="files-setup-box" class="auth-box" hidden>
+          <div class="box-title">初始化文件管理账号</div>
+          <div class="box-sub">首次使用时，先创建一个独立的文件管理邮箱账号。</div>
+          <label class="field">
+            邮箱
+            <input id="setup-email" type="email" autocomplete="username" placeholder="例如：you@example.com" />
+          </label>
+          <label class="field">
+            密码
+            <input id="setup-password" type="password" autocomplete="new-password" placeholder="至少 8 位" />
+          </label>
+          <label class="field">
+            确认密码
+            <input id="setup-password-confirm" type="password" autocomplete="new-password" placeholder="再次输入密码" />
+          </label>
+          <div class="actions">
+            <button id="setup-btn" class="btn primary" type="button">创建文件管理账号</button>
+          </div>
+        </section>
+
+        <section id="files-authed-box" class="auth-box" hidden>
+          <div class="box-title">文件管理已登录</div>
+          <div id="authed-text" class="box-sub">当前已登录。</div>
+          <div class="actions">
+            <button id="continue-btn" class="btn primary" type="button">进入文件浏览</button>
+            <button id="logout-btn" class="btn ghost" type="button">退出文件管理登录</button>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/files-login.js"></script>
+  </body>
+</html>

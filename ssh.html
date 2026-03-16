@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenClaw SSH 工具</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Noto+Sans+SC:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./ssh.css" />
+  </head>
+  <body class="ssh-body">
+    <header class="ssh-header">
+      <div>
+        <p class="ssh-tag">SSH FLEET</p>
+        <h1>OpenClaw SSH 工具</h1>
+        <p class="ssh-sub">按地区和环境分组管理 VPS，批量执行运维命令，并直接在网页里做 SSH 文件收发。</p>
+      </div>
+      <div class="ssh-header-actions">
+        <a class="header-link" href="./services.html">返回导航页</a>
+      </div>
+    </header>
+
+    <main class="ssh-layout">
+      <section class="panel panel-side">
+        <div class="panel-head">
+          <h2>主机配置</h2>
+          <div class="panel-actions">
+            <button id="ssh-reload-btn" class="btn btn-ghost" type="button">刷新</button>
+            <button id="ssh-save-btn" class="btn btn-primary" type="button">保存全部</button>
+          </div>
+        </div>
+
+        <div class="meta-grid">
+          <div class="meta-card">
+            <span class="meta-label">配置文件</span>
+            <span id="ssh-config-path" class="meta-value">-</span>
+          </div>
+          <div class="meta-card">
+            <span class="meta-label">SSH / SCP</span>
+            <span id="ssh-binary-status" class="meta-value">检测中...</span>
+          </div>
+        </div>
+
+        <div id="ssh-token-wrap" class="field hidden">
+          <label for="ssh-token">执行 Token</label>
+          <input id="ssh-token" type="password" autocomplete="off" placeholder="如已设置 OPENCLAW_TERMINAL_TOKEN，请在这里填写" />
+        </div>
+
+        <div class="field-grid two compact-grid">
+          <label>
+            默认连接超时（秒）
+            <input id="ssh-default-connect-timeout" type="number" min="1" max="60" step="1" />
+          </label>
+          <label>
+            默认命令超时（毫秒）
+            <input id="ssh-default-command-timeout" type="number" min="1000" max="600000" step="1000" />
+          </label>
+        </div>
+
+        <div class="host-toolbar">
+          <input id="ssh-search-input" type="search" placeholder="搜索名称、IP、标签、备注" />
+          <div id="ssh-group-filters" class="filter-chips"></div>
+          <div class="toolbar-actions">
+            <button id="ssh-select-all-btn" class="btn btn-ghost small" type="button">全选可见</button>
+            <button id="ssh-clear-select-btn" class="btn btn-ghost small" type="button">清空已选</button>
+            <button id="ssh-new-host-btn" class="btn btn-accent small" type="button">新建主机</button>
+          </div>
+        </div>
+
+        <div id="ssh-host-summary" class="section-tip">主机 0 台，已选 0 台</div>
+        <div id="ssh-host-groups" class="host-groups"></div>
+
+        <div class="editor-card">
+          <div class="panel-head compact">
+            <h3>主机编辑</h3>
+            <div class="panel-actions">
+              <button id="ssh-test-host-btn" class="btn btn-ghost small" type="button">测试 SSH 连通性</button>
+              <button id="ssh-save-host-btn" class="btn btn-primary small" type="button">保存当前主机</button>
+              <button id="ssh-delete-host-btn" class="btn btn-danger small" type="button">删除</button>
+            </div>
+          </div>
+
+          <input id="ssh-host-id" type="hidden" />
+          <div class="field-grid two compact-grid">
+            <label>
+              名称
+              <input id="ssh-host-name" type="text" placeholder="例如：搬瓦工-香港-01" />
+            </label>
+            <label>
+              主机地址
+              <input id="ssh-host-host" type="text" placeholder="例如：1.2.3.4 或 example.com" />
+            </label>
+            <label>
+              用户名
+              <input id="ssh-host-user" type="text" placeholder="默认 root" />
+            </label>
+            <label>
+              登录方式
+              <select id="ssh-host-auth-mode">
+                <option value="key">仅私钥</option>
+                <option value="password">仅密码</option>
+                <option value="auto">优先私钥，失败后尝试密码</option>
+              </select>
+            </label>
+            <label>
+              端口
+              <input id="ssh-host-port" type="number" min="1" max="65535" step="1" placeholder="22" />
+            </label>
+            <label class="wide">
+              私钥文件
+              <input id="ssh-host-identity-file" type="text" placeholder="例如：~/.ssh/id_ed25519" />
+            </label>
+            <label class="wide">
+              直接粘贴私钥内容
+              <textarea id="ssh-host-private-key-text" rows="6" placeholder="可直接粘贴 OPENSSH / RSA / EC / ED25519 私钥内容。点击“保存全部”后，会自动写入本机 ~/.config/openclaw/ssh-keys/ 并把上方“私钥文件”更新为生成后的路径。"></textarea>
+            </label>
+            <label class="wide">
+              直接粘贴公钥内容
+              <textarea id="ssh-host-public-key-text" rows="3" placeholder="这里粘贴 ssh-ed25519 / ssh-rsa 开头的一整行公钥，例如：ssh-ed25519 AAAA... user@example.com"></textarea>
+            </label>
+            <label class="wide">
+              已保存密码（会写入本机配置）
+              <div class="inline-password">
+                <input id="ssh-host-password" type="password" autocomplete="new-password" placeholder="仅在确有需要时填写，保存后会落盘到本机配置文件" />
+                <button id="ssh-host-password-toggle" class="btn btn-ghost small" type="button">显示</button>
+              </div>
+            </label>
+            <label class="wide">
+              本次密码（不保存）
+              <div class="inline-password">
+                <input id="ssh-host-session-password" type="password" autocomplete="off" placeholder="只在当前页面会话里生效，优先覆盖已保存密码" />
+                <button id="ssh-host-session-password-toggle" class="btn btn-ghost small" type="button">显示</button>
+              </div>
+            </label>
+            <label class="wide">
+              标签
+              <input id="ssh-host-tags" type="text" placeholder="例如：香港,生产,搬瓦工" />
+            </label>
+            <label class="wide">
+              备注
+              <textarea id="ssh-host-notes" rows="3" placeholder="例如：CN2 GIA / Docker / 业务A"></textarea>
+            </label>
+            <label class="toggle-row wide">
+              <input id="ssh-host-enabled" type="checkbox" checked />
+              启用这台主机
+            </label>
+          </div>
+          <div class="transfer-actions top-gap">
+            <button id="ssh-check-host-key-btn" class="btn btn-ghost small" type="button">检测当前主机是否已有这条公钥</button>
+            <button id="ssh-distribute-host-key-btn" class="btn btn-ghost small" type="button">把上方公钥写入当前主机</button>
+            <button id="ssh-distribute-selected-host-key-btn" class="btn btn-ghost small" type="button">把上方公钥写入已选主机</button>
+          </div>
+          <div class="section-tip">建议优先使用私钥。已保存密码会写入本机 `~/.config/openclaw/ssh-hosts.json`，本次密码不会落盘。私钥正文不会保存在浏览器本地，只有点击“保存全部”时才由后端写成 `600` 权限文件。公钥是 `ssh-ed25519` / `ssh-rsa` 这种一整行，写入的是远程 `authorized_keys`。</div>
+        </div>
+
+        <div class="editor-card">
+          <div class="panel-head compact">
+            <h3>批量导入</h3>
+            <button id="ssh-import-btn" class="btn btn-ghost small" type="button">导入到列表</button>
+          </div>
+          <p class="section-tip">每行一台，推荐格式：名称|主机|用户|端口|私钥文件|标签1,标签2|备注</p>
+          <textarea
+            id="ssh-import-text"
+            rows="6"
+            placeholder="香港-prod-01|1.2.3.4|root|22|~/.ssh/id_ed25519|香港,生产,搬瓦工|主入口&#10;日本-test-01|2.3.4.5|root|22||日本,测试|实验环境"
+          ></textarea>
+        </div>
+      </section>
+
+      <section class="panel panel-main">
+        <div class="panel-head">
+          <h2>批量运维</h2>
+          <div class="panel-actions wrap-actions">
+            <button id="ssh-clear-results-btn" class="btn btn-ghost" type="button">清空结果</button>
+            <button id="ssh-export-json-btn" class="btn btn-ghost" type="button">导出 JSON</button>
+            <button id="ssh-export-csv-btn" class="btn btn-ghost" type="button">导出 CSV</button>
+            <button id="ssh-export-md-btn" class="btn btn-ghost" type="button">导出 Markdown</button>
+            <button id="ssh-run-btn" class="btn btn-primary" type="button">执行到已选主机</button>
+          </div>
+        </div>
+
+        <div class="stack-grid">
+          <section class="command-card">
+            <div class="section-head">
+              <h3>运维命令面板</h3>
+              <span class="section-tip">点击命令卡片会把命令写入输入框，你可以再改后执行。</span>
+            </div>
+            <div id="ssh-preset-groups" class="preset-groups"></div>
+            <div class="field-grid three compact-grid top-gap">
+              <label>
+                并发数
+                <input id="ssh-concurrency" type="number" min="1" max="12" step="1" value="4" />
+              </label>
+              <label>
+                本次连接超时（秒）
+                <input id="ssh-run-connect-timeout" type="number" min="1" max="60" step="1" />
+              </label>
+              <label>
+                本次命令超时（毫秒）
+                <input id="ssh-run-command-timeout" type="number" min="1000" max="600000" step="1000" />
+              </label>
+            </div>
+            <label class="top-gap">
+              命令内容
+              <textarea id="ssh-command-input" rows="7" placeholder="例如：apt update && apt list --upgradable"></textarea>
+            </label>
+          </section>
+
+          <section class="transfer-card">
+            <div class="section-head">
+              <h3>SFTP 上传下载</h3>
+              <span id="ssh-transfer-status" class="section-tip">上传到已选主机，下载从当前编辑主机拉取。</span>
+            </div>
+            <div class="field-grid two compact-grid">
+              <label class="wide">
+                远程目标路径（上传时可填目录，末尾加 `/`）
+                <input id="ssh-upload-remote-path" type="text" placeholder="例如：/root/uploads/ 或 /etc/nginx/nginx.conf" />
+              </label>
+              <label class="wide file-picker">
+                选择本地文件上传
+                <input id="ssh-upload-file" type="file" />
+              </label>
+            </div>
+            <div class="transfer-actions">
+              <span id="ssh-upload-file-name" class="section-tip">未选择文件</span>
+              <button id="ssh-upload-btn" class="btn btn-accent" type="button">上传到已选主机</button>
+            </div>
+            <div class="separator"></div>
+            <div class="field-grid two compact-grid">
+              <label class="wide">
+                远程文件路径（下载）
+                <input id="ssh-download-remote-path" type="text" placeholder="例如：/var/log/syslog 或 /etc/nginx/nginx.conf" />
+              </label>
+            </div>
+            <div class="transfer-actions">
+              <span id="ssh-download-hint" class="section-tip">下载只支持当前编辑中的一台主机。</span>
+              <button id="ssh-download-btn" class="btn btn-accent" type="button">从当前主机下载</button>
+            </div>
+          </section>
+        </div>
+
+        <section class="command-card">
+          <div class="section-head">
+            <h3>远程文件浏览</h3>
+            <span id="ssh-remote-files-status" class="section-tip">浏览当前编辑主机的远程目录，支持新建文件夹、重命名、删除和文本在线编辑。</span>
+          </div>
+          <div class="field-grid three compact-grid">
+            <label class="wide">
+              当前路径
+              <input id="ssh-remote-path" type="text" placeholder="例如：/root 或 /var/log" />
+            </label>
+          </div>
+          <div class="transfer-actions">
+            <button id="ssh-remote-refresh-btn" class="btn btn-ghost" type="button">刷新目录</button>
+            <button id="ssh-remote-up-btn" class="btn btn-ghost" type="button">上一级</button>
+            <button id="ssh-remote-use-upload-btn" class="btn btn-accent" type="button">上传到当前目录</button>
+          </div>
+          <div class="remote-inline-actions">
+            <label class="wide">
+              新建文件夹
+              <input id="ssh-remote-new-folder-name" type="text" placeholder="输入新文件夹名称，例如：release-2026" />
+            </label>
+            <button id="ssh-remote-new-folder-btn" class="btn btn-primary" type="button">创建文件夹</button>
+          </div>
+          <div class="remote-inline-actions">
+            <label class="wide">
+              新建空白文本文件
+              <input id="ssh-remote-new-file-name" type="text" placeholder="输入文件名，例如：todo.txt 或 deploy.sh" />
+            </label>
+            <button id="ssh-remote-new-file-btn" class="btn btn-primary" type="button">创建文本文件</button>
+          </div>
+          <div class="transfer-actions">
+            <button id="ssh-remote-select-all-btn" class="btn btn-ghost" type="button">全选当前页</button>
+            <button id="ssh-remote-clear-select-btn" class="btn btn-ghost" type="button">清空选择</button>
+            <button id="ssh-remote-download-selected-btn" class="btn btn-accent" type="button">下载已选</button>
+            <button id="ssh-remote-archive-selected-btn" class="btn btn-accent" type="button">打包下载 ZIP</button>
+            <button id="ssh-remote-delete-selected-btn" class="btn btn-danger" type="button">删除已选</button>
+          </div>
+          <div class="remote-inline-actions">
+            <label class="wide">
+              ZIP 文件名
+              <input id="ssh-remote-archive-name" type="text" placeholder="可选，例如：hk-prod-backup-2026-03-14" />
+            </label>
+          </div>
+          <div class="transfer-actions">
+            <label class="toggle-row">
+              <input id="ssh-remote-auto-rename" type="checkbox" />
+              同名自动改名
+            </label>
+          </div>
+          <div class="remote-inline-actions">
+            <label class="wide">
+              移动已选到目录
+              <input id="ssh-remote-move-target" type="text" placeholder="输入目标目录，例如：/root/archive 或 ~/deploy/releases" />
+            </label>
+            <button id="ssh-remote-move-selected-btn" class="btn btn-primary" type="button">移动已选</button>
+          </div>
+          <div class="remote-inline-actions">
+            <label class="wide">
+              复制已选到目录
+              <input id="ssh-remote-copy-target" type="text" placeholder="输入目标目录，例如：/root/backup 或 ~/deploy/copies" />
+            </label>
+            <button id="ssh-remote-copy-selected-btn" class="btn btn-primary" type="button">复制已选</button>
+          </div>
+          <div id="ssh-remote-files-meta" class="section-tip">当前编辑主机切换后会重新加载目录。</div>
+          <div id="ssh-remote-files" class="remote-files"></div>
+          <div class="remote-editor">
+            <div class="section-head">
+              <h3>远程文本编辑器</h3>
+              <span id="ssh-remote-editor-status" class="section-tip">点击文件列表里的“预览编辑”即可在线查看和保存 UTF-8 文本文件。</span>
+            </div>
+            <div class="field-grid two compact-grid">
+              <label class="wide">
+                当前文件
+                <input id="ssh-remote-editor-path" type="text" readonly placeholder="尚未打开任何文本文件" />
+              </label>
+            </div>
+            <div class="field-grid two compact-grid">
+              <label class="wide">
+                搜索
+                <input id="ssh-remote-editor-search" type="text" placeholder="输入要查找的文字" />
+              </label>
+              <label class="wide">
+                替换为
+                <input id="ssh-remote-editor-replace" type="text" placeholder="输入替换后的文字" />
+              </label>
+            </div>
+            <div class="transfer-actions">
+              <label class="toggle-row">
+                <input id="ssh-remote-editor-regex" type="checkbox" />
+                正则
+              </label>
+              <label class="toggle-row">
+                <input id="ssh-remote-editor-case-sensitive" type="checkbox" />
+                区分大小写
+              </label>
+              <label class="toggle-row">
+                <input id="ssh-remote-editor-whole-word" type="checkbox" />
+                整词匹配
+              </label>
+            </div>
+            <div id="ssh-remote-editor-match-status" class="section-tip">当前没有匹配统计。</div>
+            <div class="transfer-actions">
+              <button id="ssh-remote-editor-find-next-btn" class="btn btn-ghost" type="button">下一个</button>
+              <button id="ssh-remote-editor-replace-btn" class="btn btn-ghost" type="button">替换当前</button>
+              <button id="ssh-remote-editor-replace-all-btn" class="btn btn-ghost" type="button">全部替换</button>
+              <button id="ssh-remote-editor-reload-btn" class="btn btn-ghost" type="button">重新读取</button>
+              <button id="ssh-remote-editor-save-btn" class="btn btn-primary" type="button">保存到远程</button>
+              <button id="ssh-remote-editor-close-btn" class="btn btn-ghost" type="button">关闭编辑器</button>
+            </div>
+            <textarea id="ssh-remote-editor-text" rows="14" placeholder="打开远程文本文件后，会在这里显示内容。"></textarea>
+          </div>
+        </section>
+
+        <section class="command-card">
+          <div class="section-head">
+            <h3>公钥批量分发</h3>
+            <span id="ssh-key-status" class="section-tip">把本机公钥一次性写入多台服务器的 `~/.ssh/authorized_keys`。</span>
+          </div>
+          <div class="field-grid two compact-grid">
+            <label class="wide">
+              本机公钥路径
+              <input id="ssh-public-key-path" type="text" placeholder="默认自动尝试 ~/.ssh/id_ed25519.pub" />
+            </label>
+            <label class="wide">
+              公钥内容
+              <textarea id="ssh-public-key-text" rows="4" placeholder="可留空，然后点击“读取本机公钥”"></textarea>
+            </label>
+          </div>
+          <div class="transfer-actions">
+            <button id="ssh-load-public-key-btn" class="btn btn-ghost" type="button">读取本机公钥</button>
+            <button id="ssh-distribute-key-btn" class="btn btn-primary" type="button">分发到已选主机</button>
+          </div>
+        </section>
+
+        <div class="result-head">
+          <span id="ssh-status-text">状态：就绪</span>
+          <div class="result-head-actions">
+            <button id="ssh-copy-failed-ips-btn" class="btn btn-ghost small" type="button">复制失败 IP</button>
+            <button id="ssh-copy-failed-details-btn" class="btn btn-ghost small" type="button">复制失败详情</button>
+            <button id="ssh-export-failed-txt-btn" class="btn btn-ghost small" type="button">导出失败 TXT</button>
+            <button id="ssh-export-failed-md-btn" class="btn btn-ghost small" type="button">导出失败 Markdown</button>
+            <button id="ssh-rerun-failed-btn" class="btn btn-ghost small" type="button">重新只执行失败主机</button>
+            <button id="ssh-rerun-timeout-btn" class="btn btn-ghost small" type="button">只重试超时主机</button>
+            <label class="toggle-row result-filter-toggle">
+              <input id="ssh-fail-only-toggle" type="checkbox" />
+              只看失败主机
+            </label>
+            <span id="ssh-result-summary">暂无执行记录</span>
+          </div>
+        </div>
+        <section class="summary-panel">
+          <div class="section-head">
+            <h3>结果汇总</h3>
+            <span class="section-tip">按地区和环境汇总最近一次执行结果。</span>
+          </div>
+          <div id="ssh-summary-cards" class="summary-cards"></div>
+          <div class="summary-split">
+            <div class="summary-box">
+              <div class="summary-box-title">按地区</div>
+              <div id="ssh-summary-region" class="summary-list"></div>
+            </div>
+            <div class="summary-box">
+              <div class="summary-box-title">按环境</div>
+              <div id="ssh-summary-env" class="summary-list"></div>
+            </div>
+          </div>
+        </section>
+        <div id="ssh-results" class="results"></div>
+      </section>
+    </main>
+
+    <script src="./ssh.js"></script>
+  </body>
+</html>

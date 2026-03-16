@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+systemctl daemon-reload >/dev/null 2>&1 || true
+
+if [[ "${1:-}" == "purge" ]]; then
+  rm -f /etc/openclaw/openclaw.env || true
+  rmdir --ignore-fail-on-non-empty /etc/openclaw >/dev/null 2>&1 || true
+fi
+
+exit 0

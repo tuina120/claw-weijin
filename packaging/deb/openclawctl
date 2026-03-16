@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SERVICE_NAME="openclaw-web.service"
+
+usage() {
+  cat <<'EOF'
+用法: openclawctl <命令>
+
+命令:
+  status      查看服务状态
+  start       启动服务
+  stop        停止服务
+  restart     重启服务
+  logs        跟随日志
+  env         编辑环境变量文件
+EOF
+}
+
+cmd="${1:-}"
+case "${cmd}" in
+  status)
+    systemctl status "${SERVICE_NAME}" --no-pager
+    ;;
+  start)
+    sudo systemctl start "${SERVICE_NAME}"
+    ;;
+  stop)
+    sudo systemctl stop "${SERVICE_NAME}"
+    ;;
+  restart)
+    sudo systemctl restart "${SERVICE_NAME}"
+    ;;
+  logs)
+    journalctl -u "${SERVICE_NAME}" -f
+    ;;
+  env)
+    sudo "${EDITOR:-nano}" /etc/openclaw/openclaw.env
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac

@@ -1,0 +1,26 @@
+[Unit]
+Description=OpenClaw Web Console Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=openclaw
+Group=openclaw
+WorkingDirectory=/opt/openclaw
+Environment=NODE_ENV=production
+Environment=HOME=/var/lib/openclaw
+EnvironmentFile=-/etc/openclaw/openclaw.env
+ExecStart=/usr/bin/node /opt/openclaw/server.js
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillSignal=SIGINT
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/openclaw
+
+[Install]
+WantedBy=multi-user.target

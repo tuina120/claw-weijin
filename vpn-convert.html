@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenClaw 节点转换器</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Noto+Sans+SC:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./vpn-convert.css" />
+  </head>
+  <body class="vpn-body">
+    <main class="page">
+      <header class="top">
+        <div>
+          <p class="tag">VPN CONVERTER</p>
+          <h1>OpenClaw 节点转换器</h1>
+          <p class="sub">支持订阅链接、Base64 订阅文本、原始节点，输出 Clash、sing-box、Surge、Loon、Quantumult X，并带历史、去重和筛选。</p>
+        </div>
+        <div class="top-actions">
+          <a class="header-link" href="./services.html">返回导航页</a>
+          <a class="header-link" href="./vpn-subscriptions.html">订阅管理</a>
+        </div>
+      </header>
+
+      <section class="hero-card">
+        <div class="hero-copy">
+          <div class="hero-label">快速说明</div>
+          <div class="summary-text">每行可填一个订阅链接，也可直接粘贴 `vmess://`、`vless://`、`trojan://`、`ss://`、`hysteria2://`、`tuic://` 节点。转换成功后会自动保存到历史。</div>
+        </div>
+        <div class="hero-actions">
+          <button id="convert-btn" class="btn btn-primary" type="button">开始转换</button>
+          <button id="clear-btn" class="btn btn-ghost" type="button">清空输入</button>
+        </div>
+      </section>
+
+      <p id="status" class="status">状态：等待输入</p>
+
+      <section class="workspace-grid">
+        <article class="panel input-panel">
+          <div class="panel-head">
+            <h2>节点输入</h2>
+            <span class="panel-tip">支持订阅链接 / 原始节点 / Base64 订阅文本</span>
+          </div>
+          <textarea
+            id="source-input"
+            class="source-input"
+            placeholder="示例 1：&#10;https://example.com/sub.txt&#10;&#10;示例 2：&#10;vmess://...&#10;vless://...&#10;trojan://..."
+            spellcheck="false"
+          ></textarea>
+          <div class="input-actions">
+            <button id="paste-example-btn" class="btn" type="button">填入示例</button>
+            <button id="copy-input-btn" class="btn btn-ghost" type="button">复制当前输入</button>
+            <button id="import-subs-btn" class="btn" type="button">导入常用订阅</button>
+            <button id="qr-import-btn" class="btn" type="button">二维码导入</button>
+            <button id="qr-export-btn" class="btn" type="button">二维码导出</button>
+            <input id="qr-file-input" type="file" accept="image/*" class="hidden-input" />
+          </div>
+        </article>
+
+        <article class="panel history-panel">
+          <div class="panel-head">
+            <h2>订阅历史</h2>
+            <span class="panel-tip">自动保存最近 30 次输入</span>
+          </div>
+          <div class="history-toolbar">
+            <button id="refresh-history-btn" class="btn" type="button">刷新历史</button>
+            <button id="clear-history-btn" class="btn btn-ghost" type="button">清空历史</button>
+          </div>
+          <div id="history-list" class="history-list empty">暂无历史记录</div>
+        </article>
+      </section>
+
+      <section class="panel filter-panel">
+        <div class="panel-head">
+          <h2>筛选与去重</h2>
+          <span class="panel-tip">转换时直接生效，导出内容也会按这里的条件输出</span>
+        </div>
+        <div class="filter-grid">
+          <label class="field">
+            <span class="field-label">去重方式</span>
+            <select id="dedupe-mode" class="field-input">
+              <option value="endpoint">按地址与协议去重（推荐）</option>
+              <option value="link">仅按原始链接去重</option>
+              <option value="none">不去重</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span class="field-label">地区筛选</span>
+            <select id="region-filter" class="field-input">
+              <option value="all">全部地区</option>
+              <option value="hk">香港</option>
+              <option value="tw">台湾</option>
+              <option value="jp">日本</option>
+              <option value="sg">新加坡</option>
+              <option value="us">美国</option>
+              <option value="kr">韩国</option>
+              <option value="uk">英国</option>
+              <option value="de">德国</option>
+              <option value="fr">法国</option>
+              <option value="nl">荷兰</option>
+              <option value="ca">加拿大</option>
+              <option value="au">澳大利亚</option>
+              <option value="my">马来西亚</option>
+              <option value="in">印度</option>
+              <option value="ru">俄罗斯</option>
+              <option value="other">其他</option>
+            </select>
+          </label>
+
+          <label class="field keyword-field">
+            <span class="field-label">关键词筛选</span>
+            <input id="keyword-filter" class="field-input" type="text" placeholder="可输入名称、域名、地区关键词" />
+          </label>
+        </div>
+
+        <div class="protocol-section">
+          <div class="field-label">协议筛选</div>
+          <div class="chip-row" id="protocol-chips">
+            <label class="chip"><input type="checkbox" value="vmess" /> vmess</label>
+            <label class="chip"><input type="checkbox" value="vless" /> vless</label>
+            <label class="chip"><input type="checkbox" value="trojan" /> trojan</label>
+            <label class="chip"><input type="checkbox" value="ss" /> ss</label>
+            <label class="chip"><input type="checkbox" value="hysteria2" /> hysteria2</label>
+            <label class="chip"><input type="checkbox" value="tuic" /> tuic</label>
+          </div>
+        </div>
+      </section>
+
+      <section class="stats-grid">
+        <article class="panel stat-card">
+          <div class="stat-label">当前节点</div>
+          <div id="total-count" class="stat-value">0</div>
+          <div id="summary-text" class="stat-desc">尚未转换</div>
+        </article>
+        <article class="panel stat-card">
+          <div class="stat-label">协议分布</div>
+          <div id="protocols" class="stat-protocols">-</div>
+          <div class="stat-desc">按筛选后的结果统计</div>
+        </article>
+        <article class="panel stat-card">
+          <div class="stat-label">地区分布</div>
+          <div id="regions" class="stat-protocols">-</div>
+          <div class="stat-desc">按名称与地址关键词推断</div>
+        </article>
+        <article class="panel stat-card">
+          <div class="stat-label">订阅抓取</div>
+          <div id="fetch-count" class="stat-value">0</div>
+          <div id="stat-extra" class="stat-desc">远程订阅源处理情况</div>
+        </article>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <div class="panel-head">
+            <h2>抓取与警告</h2>
+            <span class="panel-tip">订阅抓取失败、去重和筛选提示都会显示在这里</span>
+          </div>
+          <div id="warnings-list" class="list-box empty">暂无警告</div>
+          <div id="sources-list" class="list-box empty">暂无订阅抓取记录</div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h2>节点明细</h2>
+            <span class="panel-tip">显示前 200 条，便于快速核对</span>
+          </div>
+          <div id="nodes-table-wrap" class="table-wrap empty">尚未转换</div>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>转换结果</h2>
+          <span class="panel-tip">支持复制与下载当前标签内容</span>
+        </div>
+        <div class="output-toolbar">
+          <div class="tab-row" id="tab-row">
+            <button class="tab-btn active" type="button" data-tab="raw">原始节点</button>
+            <button class="tab-btn" type="button" data-tab="base64">Base64</button>
+            <button class="tab-btn" type="button" data-tab="clash">Clash YAML</button>
+            <button class="tab-btn" type="button" data-tab="singbox">sing-box</button>
+            <button class="tab-btn" type="button" data-tab="surge">Surge</button>
+            <button class="tab-btn" type="button" data-tab="loon">Loon</button>
+            <button class="tab-btn" type="button" data-tab="quantumultx">Quantumult X</button>
+          </div>
+          <div class="toolbar-actions">
+            <button id="copy-btn" class="btn" type="button">复制当前结果</button>
+            <button id="download-btn" class="btn btn-ghost" type="button">下载当前结果</button>
+            <button id="download-link-qr-btn" class="btn btn-ghost" type="button">下载链接二维码</button>
+            <button id="copy-download-link-btn" class="icon-btn" type="button" title="复制下载链接" aria-label="复制下载链接">
+              <span class="copy-link-icon" aria-hidden="true"></span>
+            </button>
+          </div>
+        </div>
+        <textarea id="output-text" class="output-text" spellcheck="false" readonly></textarea>
+      </section>
+
+      <section id="qr-modal" class="qr-modal" hidden>
+        <div class="qr-dialog">
+          <div class="qr-head">
+            <h2>二维码预览</h2>
+            <button id="qr-close-btn" class="btn btn-ghost" type="button">关闭</button>
+          </div>
+          <div class="qr-body">
+            <div class="qr-image-wrap">
+              <img id="qr-image" alt="节点二维码" />
+            </div>
+            <textarea id="qr-text-preview" class="qr-text-preview" readonly></textarea>
+          </div>
+          <div class="qr-actions">
+            <button id="qr-copy-text-btn" class="btn" type="button">复制二维码内容</button>
+            <button id="qr-download-btn" class="btn btn-primary" type="button">下载二维码</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="./vpn-convert-page.js"></script>
+  </body>
+</html>

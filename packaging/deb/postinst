@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SERVICE_NAME="openclaw-web.service"
+ENV_DIR="/etc/openclaw"
+ENV_FILE="${ENV_DIR}/openclaw.env"
+ENV_TEMPLATE="/opt/openclaw/packaging/deb/openclaw.env"
+DATA_ROOT="/var/lib/openclaw"
+
+if ! getent group openclaw >/dev/null 2>&1; then
+  groupadd --system openclaw
+fi
+
+if ! id -u openclaw >/dev/null 2>&1; then
+  useradd --system --gid openclaw --home-dir "${DATA_ROOT}" --create-home --shell /usr/sbin/nologin openclaw
+fi
+
+mkdir -p "${ENV_DIR}" "${DATA_ROOT}" "${DATA_ROOT}/share"
+chown -R openclaw:openclaw "${DATA_ROOT}"
+
+if [[ ! -f "${ENV_FILE}" ]]; then
+  install -m 640 -o root -g openclaw "${ENV_TEMPLATE}" "${ENV_FILE}"
+fi
+
+chown -R openclaw:openclaw /opt/openclaw
+
+systemctl daemon-reload
+if [[ "${1:-}" == "configure" ]]; then
+  systemctl enable --now "${SERVICE_NAME}" >/dev/null 2>&1 || true
+fi
+
+exit 0

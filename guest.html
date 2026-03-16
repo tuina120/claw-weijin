@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenClaw 访客体验</title>
+    <link rel="stylesheet" href="/guest.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="top">
+        <div class="brand">
+          <div class="logo">OC</div>
+          <div class="meta">
+            <div class="title">OpenClaw 访客体验</div>
+            <div class="sub">访客模式不落库、不执行命令、不提供终端/项目功能。建议体验后自行部署一台。</div>
+          </div>
+        </div>
+        <div class="top-actions">
+          <button id="logout-btn" class="btn ghost" type="button">退出访客</button>
+        </div>
+      </header>
+
+      <section class="card">
+        <div class="status" id="status">正在验证体验链接...</div>
+
+        <details class="cfg" id="cfg" open>
+          <summary>接入配置（体验用，保存在浏览器本地）</summary>
+          <div class="cfg-body">
+            <div class="row">
+              <label>
+                提供商
+                <select id="provider">
+                  <option value="openai">OpenAI 兼容</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="gemini">Gemini（OpenAI 兼容）</option>
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="azure_openai">Azure OpenAI</option>
+                  <option value="custom">自定义（OpenAI 兼容）</option>
+                </select>
+              </label>
+              <label>
+                模型 ID
+                <input id="model" type="text" placeholder="例如 gpt-4o-mini / gpt-5.2" />
+              </label>
+            </div>
+            <div class="row">
+              <label class="grow">
+                baseUrl（只允许公网 HTTPS 常见模型接口）
+                <input id="baseUrl" type="url" placeholder="https://api.openai.com/v1" />
+              </label>
+              <label>
+                API Key
+                <input id="apiKey" type="password" autocomplete="off" placeholder="sk-..." />
+              </label>
+            </div>
+            <div class="hint">
+              说明：这里填的是你自己的 Key。OpenClaw 不会把它保存到服务器，只会随请求发送给上游。
+            </div>
+          </div>
+        </details>
+
+        <section class="chat">
+          <div id="messages" class="messages"></div>
+          <div class="composer">
+            <textarea id="input" rows="4" placeholder="输入消息，Ctrl+Enter 发送"></textarea>
+            <div class="composer-actions">
+              <span id="chat-status" class="chat-status">就绪</span>
+              <button id="send-btn" class="btn primary" type="button">发送</button>
+            </div>
+          </div>
+        </section>
+
+        <details class="deploy" id="deploy">
+          <summary>体验后自己部署（推荐）</summary>
+          <div class="deploy-body">
+            <div class="hint">你可以让管理员把部署包/仓库地址发你，然后按 README 本地启动：</div>
+            <pre class="code"><code>cd openclaw
+npm i
+node server.js
+</code></pre>
+            <div class="hint">如果你也要外网访问，推荐用 Cloudflare Tunnel + Access（邮箱一次性验证码）。</div>
+          </div>
+        </details>
+      </section>
+    </main>
+
+    <script src="/guest.js"></script>
+  </body>
+</html>

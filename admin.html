@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenClaw 管理员</title>
+    <link rel="stylesheet" href="/admin.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="top">
+        <div class="brand">
+          <div class="logo">OC</div>
+          <div class="meta">
+            <div class="title">OpenClaw 管理员</div>
+            <div class="sub">生成访客体验链接，以及 Cloudflare Tunnel/Access 部署提示。</div>
+          </div>
+        </div>
+        <div class="top-actions">
+          <a class="btn ghost" href="/services.html">返回导航页</a>
+        </div>
+      </header>
+
+      <section class="card">
+        <div class="status" id="status">正在加载...</div>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div class="panel-title">访客体验链接</div>
+            <div class="panel-sub">给别人体验用：一次性、限时、访客自己填 Key，且不落库/不执行命令。</div>
+          </div>
+
+          <div class="row">
+            <button id="invite-btn" class="btn primary" type="button">生成体验链接</button>
+            <button id="copy-btn" class="btn" type="button" disabled>复制链接</button>
+            <button id="qr-btn" class="btn" type="button" disabled>显示二维码</button>
+          </div>
+
+          <div class="out">
+            <div class="out-label">体验链接</div>
+            <input id="invite-url" type="text" readonly placeholder="点击“生成体验链接”" />
+            <div class="out-meta" id="invite-meta"></div>
+            <div class="qr" id="qr-box" hidden>
+              <img id="qr-img" alt="体验链接二维码" />
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div class="panel-title">Cloudflare Tunnel/Access（部署提示）</div>
+            <div class="panel-sub">推荐：主站用 Access 严格放行，访客入口单独放行再由体验码控制。</div>
+          </div>
+          <div class="hint">
+            你可以按 README 的步骤配置 Cloudflare Tunnel。Access 推荐做 2 个 Application：
+            1) <code>claw.qxyx.net</code> 的主站：只允许你的邮箱；
+            2) 访客入口：<code>/guest*</code> 或 <code>guest.qxyx.net</code> 设为 Bypass（让体验码接管）。
+          </div>
+          <pre class="code"><code id="cf-snippet"></code></pre>
+        </section>
+      </section>
+    </main>
+
+    <script src="/admin.js"></script>
+  </body>
+</html>

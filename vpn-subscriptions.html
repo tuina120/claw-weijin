@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenClaw 订阅管理</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Noto+Sans+SC:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./vpn-subscriptions.css" />
+  </head>
+  <body class="subs-body">
+    <main class="page">
+      <header class="top">
+        <div>
+          <p class="tag">SUBSCRIPTIONS</p>
+          <h1>常用订阅管理</h1>
+          <p class="sub">把常用订阅单独保存，支持批量导入、编辑、启停和一键带入节点转换器。</p>
+        </div>
+        <div class="top-actions">
+          <a class="header-link" href="./services.html">返回导航页</a>
+          <a class="header-link" href="./vpn-convert.html">打开节点转换器</a>
+        </div>
+      </header>
+
+      <section class="hero-card">
+        <div>
+          <div class="hero-label">说明</div>
+          <div class="hero-text">每行一个订阅链接，或用 `名称,订阅链接` 批量导入。启用状态会决定是否加入转换器。</div>
+        </div>
+        <div class="hero-actions">
+          <button id="refresh-btn" class="btn" type="button">刷新</button>
+          <button id="save-btn" class="btn btn-primary" type="button">保存全部</button>
+        </div>
+      </section>
+
+      <p id="status" class="status">状态：准备就绪</p>
+
+      <section class="grid">
+        <article class="panel">
+          <div class="panel-head">
+            <h2>批量导入</h2>
+            <span class="panel-tip">支持：`名称,URL` 或仅 `URL`</span>
+          </div>
+          <textarea id="batch-input" class="batch-input" placeholder="示例：&#10;家宽节点A,https://example.com/sub-a.txt&#10;https://example.com/sub-b.txt"></textarea>
+          <div class="panel-actions">
+            <button id="batch-import-btn" class="btn" type="button">批量导入</button>
+            <button id="clear-batch-btn" class="btn btn-ghost" type="button">清空输入</button>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h2>快捷操作</h2>
+            <span class="panel-tip">对启用订阅执行</span>
+          </div>
+          <div class="quick-actions">
+            <button id="add-row-btn" class="btn" type="button">新增一行</button>
+            <button id="copy-enabled-btn" class="btn" type="button">复制启用链接</button>
+            <button id="send-convert-btn" class="btn btn-primary" type="button">导入到节点转换器</button>
+          </div>
+          <div class="helper">导入到节点转换器后，会自动把启用链接填到输入框。</div>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>订阅列表</h2>
+          <span class="panel-tip">最多保存 300 条</span>
+        </div>
+        <div id="table-wrap" class="table-wrap empty">暂无订阅，先从上面批量导入或新增一行。</div>
+      </section>
+    </main>
+
+    <script src="./vpn-subscriptions.js"></script>
+  </body>
+</html>
