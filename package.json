@@ -1,6 +1,6 @@
 {
   "name": "openclaw-model-console",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "OpenClaw 多模型中文网页配置台。",
   "scripts": {

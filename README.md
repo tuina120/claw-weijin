@@ -53,26 +53,26 @@ chmod +x scripts/build-ubuntu-deb.sh
 默认会在 `dist/` 目录生成类似：
 
 ```text
-dist/openclaw_1.0.0_amd64.deb
+dist/openclaw_1.0.1_amd64.deb
 ```
 
 仓库已包含该安装包，也可直接下载：
 
 ```text
-https://github.com/tuina120/claw-weijin/raw/main/dist/openclaw_1.0.0_amd64.deb
+https://github.com/tuina120/claw-weijin/raw/main/dist/openclaw_1.0.1_amd64.deb
 ```
 
 安装：
 
 ```bash
-sudo dpkg -i dist/openclaw_1.0.0_amd64.deb
+sudo dpkg -i dist/openclaw_1.0.1_amd64.deb
 ```
 
 如果是从 GitHub 直接下载后安装：
 
 ```bash
-curl -L -o openclaw_1.0.0_amd64.deb https://github.com/tuina120/claw-weijin/raw/main/dist/openclaw_1.0.0_amd64.deb
-sudo dpkg -i openclaw_1.0.0_amd64.deb
+curl -L -o openclaw_1.0.1_amd64.deb https://github.com/tuina120/claw-weijin/raw/main/dist/openclaw_1.0.1_amd64.deb
+sudo dpkg -i openclaw_1.0.1_amd64.deb
 ```
 
 说明：安装包默认不会包含你本机的 `bridge.config.json`（避免把 API Key 一起打包）。
