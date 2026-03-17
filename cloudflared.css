@@ -182,7 +182,7 @@ h1 {
 }
 
 .stats-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .grid {
@@ -304,19 +304,26 @@ h1 {
 }
 
 @media (max-width: 960px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .top,
   .hero-card {
     flex-direction: column;
     align-items: stretch;
   }
 
-  .stats-grid,
   .grid {
     grid-template-columns: 1fr;
   }
 }
 
 @media (max-width: 640px) {
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
+
   .kv-list {
     grid-template-columns: 1fr;
   }

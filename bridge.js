@@ -41,15 +41,20 @@ async function main() {
   let started = false;
   if (config.telegram.enabled) {
     started = true;
-    startTelegramLoop(config).catch((error) => {
-      logError(`Telegram 轮询异常: ${error.message}`);
-      process.exitCode = 1;
-    });
+    if (config.telegram.mode === "webhook") {
+      startBridgeHttpServer(config);
+      await setupTelegramWebhook(config);
+    } else {
+      startTelegramLoop(config).catch((error) => {
+        logError(`Telegram 轮询异常: ${error.message}`);
+        process.exitCode = 1;
+      });
+    }
   }
 
   if (config.feishu.enabled) {
     started = true;
-    startFeishuServer(config);
+    startBridgeHttpServer(config);
   }
 
   if (!started) {
@@ -78,11 +83,13 @@ function loadBridgeConfig(configPath) {
 
   const model = parsed.model || {};
   const telegram = parsed.telegram || {};
+  const telegramWebhook = telegram.webhook || {};
   const feishu = parsed.feishu || {};
   const bot = parsed.bot || {};
 
   const resolvedModelApiKey = resolveSecretValue(model.apiKey);
   const resolvedTelegramBotToken = resolveSecretValue(telegram.botToken);
+  const resolvedTelegramWebhookSecretToken = resolveSecretValue(telegramWebhook.secretToken);
   const resolvedFeishuAppId = resolveSecretValue(feishu.appId);
   const resolvedFeishuAppSecret = resolveSecretValue(feishu.appSecret);
   const resolvedFeishuVerifyToken = resolveSecretValue(feishu.verifyToken);
@@ -114,9 +121,24 @@ function loadBridgeConfig(configPath) {
       enabled: !!telegram.enabled,
       botToken: resolvedTelegramBotToken,
       apiBase: String(telegram.apiBase || "https://api.telegram.org").trim(),
+      mode: String(telegram.mode || "polling").trim().toLowerCase() === "webhook" ? "webhook" : "polling",
       pollTimeoutSec: clampInt(telegram.pollTimeoutSec, 20, 1, 50),
       pollIntervalMs: clampInt(telegram.pollIntervalMs, 1200, 300, 15000),
-      allowedChatIds: normalizeStringList(telegram.allowedChatIds)
+      allowedChatIds: normalizeStringList(telegram.allowedChatIds),
+      webhook: {
+        enabled: telegramWebhook.enabled !== false,
+        publicUrl: String(telegramWebhook.publicUrl || process.env.TELEGRAM_WEBHOOK_PUBLIC_URL || "").trim(),
+        path: normalizeWebhookPath(telegramWebhook.path || "/telegram/webhook"),
+        secretToken: String(resolvedTelegramWebhookSecretToken || "").trim(),
+        dropPendingUpdates: telegramWebhook.dropPendingUpdates !== false,
+        listenHost: String(telegramWebhook.listenHost || "127.0.0.1").trim() || "127.0.0.1",
+        listenPort: clampInt(
+          telegramWebhook.listenPort || process.env.TELEGRAM_WEBHOOK_LISTEN_PORT,
+          4174,
+          1,
+          65535
+        )
+      }
     },
     feishu: {
       enabled: !!feishu.enabled,
@@ -134,6 +156,12 @@ function loadBridgeConfig(configPath) {
 function normalizeStringList(input) {
   if (!Array.isArray(input)) return [];
   return input.map((item) => String(item).trim()).filter(Boolean);
+}
+
+function normalizeWebhookPath(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return "/telegram/webhook";
+  return raw.startsWith("/") ? raw : `/${raw}`;
 }
 
 function resolveSecretValue(input) {
@@ -172,7 +200,12 @@ async function startTelegramLoop(config) {
         await handleTelegramUpdate(config, apiPrefix, update);
       }
     } catch (error) {
-      logError(`Telegram 轮询失败: ${formatErrorMessage(error)}`);
+      const detail = formatErrorMessage(error);
+      if (isTelegramTransientError(detail)) {
+        logInfo(`Telegram 轮询网络波动: ${detail}`);
+      } else {
+        logError(`Telegram 轮询失败: ${detail}`);
+      }
       await sleep(config.telegram.pollIntervalMs);
     }
   }
@@ -180,7 +213,7 @@ async function startTelegramLoop(config) {
 
 async function telegramGetUpdates(apiPrefix, offset, timeoutSec) {
   const url = `${apiPrefix}/getUpdates?offset=${offset}&timeout=${timeoutSec}`;
-  const data = await requestJson(url, { method: "GET", timeoutMs: (timeoutSec + 15) * 1000 });
+  const data = await requestJson(url, { method: "GET", timeoutMs: resolveTelegramRequestTimeoutMs(timeoutSec) });
   if (!data.ok) {
     throw new Error(`getUpdates 失败: ${data.description || "unknown"}`);
   }
@@ -230,12 +263,17 @@ async function telegramSendText(apiPrefix, chatId, text) {
   }
 }
 
-function startFeishuServer(config) {
-  if (!config.feishu.appId || !config.feishu.appSecret) {
+let bridgeHttpServer = null;
+
+function startBridgeHttpServer(config) {
+  if (bridgeHttpServer) return bridgeHttpServer;
+  const listenHost = config.telegram?.mode === "webhook" ? config.telegram.webhook.listenHost : "127.0.0.1";
+  const listenPort = config.telegram?.mode === "webhook" ? config.telegram.webhook.listenPort : config.feishu.port;
+  if (config.feishu.enabled && (!config.feishu.appId || !config.feishu.appSecret)) {
     throw new Error("feishu.appId / feishu.appSecret 为空");
   }
 
-  const server = http.createServer(async (req, res) => {
+  bridgeHttpServer = http.createServer(async (req, res) => {
     const method = req.method || "GET";
     const pathName = decodeURIComponent((req.url || "/").split("?")[0]);
 
@@ -244,96 +282,160 @@ function startFeishuServer(config) {
       return;
     }
 
-    if (method !== "POST" || pathName !== config.feishu.path) {
-      sendJson(res, 404, { error: "未找到资源" });
+    if (config.telegram.enabled && config.telegram.mode === "webhook" && method === "POST" && pathName === config.telegram.webhook.path) {
+      await handleTelegramWebhookRequest(config, req, res);
       return;
     }
 
-    try {
-      const payload = await readJsonBody(req);
-      if (payload.challenge) {
-        if (!verifyFeishuToken(config, payload)) {
-          sendJson(res, 403, { code: 403, msg: "token 验证失败" });
-          return;
-        }
-        sendJson(res, 200, { challenge: payload.challenge });
-        return;
-      }
+    if (config.feishu.enabled && method === "POST" && pathName === config.feishu.path) {
+      await handleFeishuEventRequest(config, req, res);
+      return;
+    }
 
+    sendJson(res, 404, { error: "未找到资源" });
+  });
+
+  bridgeHttpServer.listen(listenPort, listenHost, () => {
+    const parts = [];
+    if (config.telegram.enabled && config.telegram.mode === "webhook") {
+      parts.push(`Telegram webhook: http://${listenHost}:${listenPort}${config.telegram.webhook.path}`);
+    }
+    if (config.feishu.enabled) {
+      parts.push(`飞书事件: http://${listenHost}:${listenPort}${config.feishu.path}`);
+    }
+    logInfo(`桥接 HTTP 服务已启动：${parts.join(" | ") || `http://${listenHost}:${listenPort}`}`);
+  });
+
+  return bridgeHttpServer;
+}
+
+async function setupTelegramWebhook(config) {
+  if (!config.telegram.enabled || config.telegram.mode !== "webhook") return;
+  const webhook = config.telegram.webhook || {};
+  const publicUrl = String(webhook.publicUrl || "").trim();
+  if (!publicUrl) {
+    throw new Error("telegram.webhook.publicUrl 为空（Webhook 模式必填）");
+  }
+  const apiPrefix = `${config.telegram.apiBase}/bot${config.telegram.botToken}`;
+  const payload = {
+    url: publicUrl,
+    drop_pending_updates: webhook.dropPendingUpdates !== false,
+    allowed_updates: ["message", "edited_message"]
+  };
+  if (webhook.secretToken) payload.secret_token = webhook.secretToken;
+
+  const data = await requestJson(`${apiPrefix}/setWebhook`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: payload,
+    timeoutMs: 45000
+  });
+  if (!data.ok) {
+    throw new Error(`Telegram setWebhook 失败: ${data.description || "unknown"}`);
+  }
+  logInfo(`Telegram 已切换为 Webhook：${publicUrl}`);
+}
+
+async function handleTelegramWebhookRequest(config, req, res) {
+  try {
+    const webhook = config.telegram.webhook || {};
+    const expectedToken = String(webhook.secretToken || "").trim();
+    const gotToken = String(req.headers["x-telegram-bot-api-secret-token"] || "").trim();
+    if (expectedToken && gotToken !== expectedToken) {
+      sendJson(res, 403, { ok: false, error: "telegram secret_token 不匹配" });
+      return;
+    }
+
+    const payload = await readJsonBody(req);
+    const apiPrefix = `${config.telegram.apiBase}/bot${config.telegram.botToken}`;
+    await handleTelegramUpdate(config, apiPrefix, payload);
+    sendJson(res, 200, { ok: true });
+  } catch (error) {
+    logError(`Telegram webhook 处理失败: ${error.message}`);
+    sendJson(res, 200, { ok: false });
+  }
+}
+
+async function handleFeishuEventRequest(config, req, res) {
+  try {
+    const payload = await readJsonBody(req);
+    if (payload.challenge) {
       if (!verifyFeishuToken(config, payload)) {
         sendJson(res, 403, { code: 403, msg: "token 验证失败" });
         return;
       }
-
-      if (payload.encrypt) {
-        sendJson(res, 200, {
-          code: 0,
-          msg: "收到加密事件。当前桥接服务未实现 decrypt，请在飞书事件订阅中关闭 encrypt。"
-        });
-        return;
-      }
-
-      const eventId = String(payload.header?.event_id || payload.event_id || "").trim();
-      if (eventId && isFeishuEventHandled(eventId)) {
-        sendJson(res, 200, { code: 0 });
-        return;
-      }
-      if (eventId) markFeishuEventHandled(eventId);
-
-      const eventType = String(payload.header?.event_type || "").trim();
-      if (eventType !== "im.message.receive_v1") {
-        sendJson(res, 200, { code: 0 });
-        return;
-      }
-
-      const event = payload.event || {};
-      const message = event.message || {};
-      const chatId = String(message.chat_id || "").trim();
-      if (!chatId) {
-        sendJson(res, 200, { code: 0 });
-        return;
-      }
-
-      if (config.feishu.allowedChatIds.length && !config.feishu.allowedChatIds.includes(chatId)) {
-        sendJson(res, 200, { code: 0 });
-        return;
-      }
-
-      const messageType = String(message.message_type || "").trim();
-      if (messageType !== "text") {
-        sendJson(res, 200, { code: 0 });
-        return;
-      }
-
-      const userText = parseFeishuText(message.content);
-      if (!userText) {
-        sendJson(res, 200, { code: 0 });
-        return;
-      }
-
-      // 飞书要求回调尽快返回，这里先返回 200，再异步处理模型调用。
-      sendJson(res, 200, { code: 0 });
-
-      handleIncomingMessage(config, {
-        platform: "feishu",
-        threadId: `feishu:${chatId}`,
-        userText
-      })
-        .then(async (replyText) => {
-          if (!replyText) return;
-          await feishuSendText(config, chatId, replyText);
-        })
-        .catch((error) => {
-          logError(`飞书消息处理失败: ${error.message}`);
-        });
-    } catch (error) {
-      sendJson(res, 400, { code: 400, msg: error.message || "请求无效" });
+      sendJson(res, 200, { challenge: payload.challenge });
+      return;
     }
-  });
 
-  server.listen(config.feishu.port, () => {
-    logInfo(`飞书事件服务已启动: http://localhost:${config.feishu.port}${config.feishu.path}`);
-  });
+    if (!verifyFeishuToken(config, payload)) {
+      sendJson(res, 403, { code: 403, msg: "token 验证失败" });
+      return;
+    }
+
+    if (payload.encrypt) {
+      sendJson(res, 200, {
+        code: 0,
+        msg: "收到加密事件。当前桥接服务未实现 decrypt，请在飞书事件订阅中关闭 encrypt。"
+      });
+      return;
+    }
+
+    const eventId = String(payload.header?.event_id || payload.event_id || "").trim();
+    if (eventId && isFeishuEventHandled(eventId)) {
+      sendJson(res, 200, { code: 0 });
+      return;
+    }
+    if (eventId) markFeishuEventHandled(eventId);
+
+    const eventType = String(payload.header?.event_type || "").trim();
+    if (eventType !== "im.message.receive_v1") {
+      sendJson(res, 200, { code: 0 });
+      return;
+    }
+
+    const event = payload.event || {};
+    const message = event.message || {};
+    const chatId = String(message.chat_id || "").trim();
+    if (!chatId) {
+      sendJson(res, 200, { code: 0 });
+      return;
+    }
+
+    if (config.feishu.allowedChatIds.length && !config.feishu.allowedChatIds.includes(chatId)) {
+      sendJson(res, 200, { code: 0 });
+      return;
+    }
+
+    const messageType = String(message.message_type || "").trim();
+    if (messageType !== "text") {
+      sendJson(res, 200, { code: 0 });
+      return;
+    }
+
+    const userText = parseFeishuText(message.content);
+    if (!userText) {
+      sendJson(res, 200, { code: 0 });
+      return;
+    }
+
+    sendJson(res, 200, { code: 0 });
+
+    handleIncomingMessage(config, {
+      platform: "feishu",
+      threadId: `feishu:${chatId}`,
+      userText
+    })
+      .then(async (replyText) => {
+        if (!replyText) return;
+        await feishuSendText(config, chatId, replyText);
+      })
+      .catch((error) => {
+        logError(`飞书消息处理失败: ${error.message}`);
+      });
+  } catch (error) {
+    sendJson(res, 400, { code: 400, msg: error.message || "请求无效" });
+  }
 }
 
 function verifyFeishuToken(config, payload) {
@@ -928,6 +1030,26 @@ function resolveRequestTimeoutMs(input) {
     process.env.HTTP_TIMEOUT_MS ||
     "";
   return clampInt(envValue, 120000, 1000, 10 * 60 * 1000);
+}
+
+function resolveTelegramRequestTimeoutMs(timeoutSec) {
+  const baseMs = (clampInt(timeoutSec, 20, 1, 120) + 15) * 1000;
+  const envMs = clampInt(process.env.BRIDGE_TELEGRAM_REQUEST_TIMEOUT_MS, 65000, 5000, 10 * 60 * 1000);
+  return Math.max(baseMs, envMs);
+}
+
+function isTelegramTransientError(message) {
+  const text = String(message || "").toLowerCase();
+  if (!text) return false;
+  return (
+    text.includes("timeout") ||
+    text.includes("超时") ||
+    text.includes("eai_again") ||
+    text.includes("und_err_connect_timeout") ||
+    text.includes("fetch failed") ||
+    text.includes("tls handshake") ||
+    text.includes("connection with edge closed")
+  );
 }
 
 function shouldLogIgnoredTelegramChat(chatId) {

@@ -75,6 +75,65 @@ const mihomoWorkConfigPath = path.join(mihomoConfigDir, "work", "config.yaml");
 const cloudflaredDirectOverrideId = "openclaw-cloudflared-direct";
 const cloudflaredDirectOverridePath = path.join(mihomoOverrideDir, `${cloudflaredDirectOverrideId}.yaml`);
 const cloudflaredGuardLogPath = path.join(userHome, ".config", "openclaw", "logs", "cloudflared-direct-guard.log");
+const telegramWebhookPublicPath = normalizeWebhookProxyPath(
+  process.env.OPENCLAW_TELEGRAM_WEBHOOK_PUBLIC_PATH || "/api/telegram/webhook"
+);
+const telegramWebhookLocalUrl = String(
+  process.env.OPENCLAW_TELEGRAM_WEBHOOK_LOCAL_URL || "http://127.0.0.1:4174/telegram/webhook"
+).trim();
+const telegramWebhookProxyTimeoutMs = clampInt(
+  Number(process.env.OPENCLAW_TELEGRAM_WEBHOOK_PROXY_TIMEOUT_MS || 30000),
+  30000,
+  2000,
+  120000
+);
+const telegramWebhookHealthStatePath = path.join(userHome, ".config", "openclaw", "telegram-webhook-health.json");
+const telegramWebhookHealthEventLimit = clampInt(
+  Number(process.env.OPENCLAW_TELEGRAM_WEBHOOK_HEALTH_EVENTS || 120),
+  120,
+  20,
+  500
+);
+const telegramWebhookSelfTestTimeoutMs = clampInt(
+  Number(process.env.OPENCLAW_TELEGRAM_WEBHOOK_SELF_TEST_TIMEOUT_MS || 12000),
+  12000,
+  2000,
+  60000
+);
+const cloudflaredEventLookbackHours = 24;
+const cloudflaredDropEventKeywords = [
+  "lost connection with the edge",
+  "connection with edge closed",
+  "context deadline exceeded",
+  "quic timeout",
+  "failed to serve incoming request",
+  "serve tunnel error"
+];
+const cloudflaredTelegramAlertStatePath = path.join(userHome, ".config", "openclaw", "cloudflared-telegram-alert-state.json");
+const cloudflaredTelegramAlertCheckIntervalMs = clampInt(
+  Number(process.env.OPENCLAW_CLOUDFLARED_TG_ALERT_CHECK_MS || 2 * 60 * 1000),
+  2 * 60 * 1000,
+  30 * 1000,
+  30 * 60 * 1000
+);
+const cloudflaredTelegramAlertMinIntervalMs = clampInt(
+  Number(process.env.OPENCLAW_CLOUDFLARED_TG_ALERT_MIN_INTERVAL_MS || 10 * 60 * 1000),
+  10 * 60 * 1000,
+  60 * 1000,
+  6 * 60 * 60 * 1000
+);
+const cloudflaredTelegramAlertStartupDelayMs = clampInt(
+  Number(process.env.OPENCLAW_CLOUDFLARED_TG_ALERT_STARTUP_DELAY_MS || 25 * 1000),
+  25 * 1000,
+  1000,
+  5 * 60 * 1000
+);
+const cloudflaredTelegramAlertConsecutiveThreshold = clampInt(
+  Number(process.env.OPENCLAW_CLOUDFLARED_TG_ALERT_CONSECUTIVE_THRESHOLD || 5),
+  5,
+  1,
+  120
+);
 const terminalToken = String(process.env.OPENCLAW_TERMINAL_TOKEN || process.env.TERMINAL_TOKEN || "").trim();
 const terminalOutputLimit = 200000;
 const terminalTimeoutMs = 12000;
@@ -84,6 +143,24 @@ const sshDefaultConnectTimeoutSec = 8;
 const sshTransferMaxBytes = 20 * 1024 * 1024;
 const sshDownloadMaxBytes = 100 * 1024 * 1024;
 const sshRemoteTextMaxBytes = 1024 * 1024;
+const sshInteractiveSessionTtlMs = clampInt(
+  Number(process.env.OPENCLAW_SSH_INTERACTIVE_TTL_MS || 30 * 60 * 1000),
+  30 * 60 * 1000,
+  2 * 60 * 1000,
+  24 * 60 * 60 * 1000
+);
+const sshInteractiveMaxChunks = clampInt(
+  Number(process.env.OPENCLAW_SSH_INTERACTIVE_MAX_CHUNKS || 2000),
+  2000,
+  200,
+  10000
+);
+const sshInteractiveMaxSessions = clampInt(
+  Number(process.env.OPENCLAW_SSH_INTERACTIVE_MAX_SESSIONS || 20),
+  20,
+  1,
+  200
+);
 const startupSequenceDefaults = {
   enabled: false,
   maxCharsPerFile: 6000,
@@ -313,9 +390,33 @@ const fileManagerSessionTtlMs = clampInt(Number(process.env.OPENCLAW_FILES_SESSI
 const fileManagerSessions = new Map(); // sid -> { user, expiresAt }
 const pendingAuth = new Map(); // state -> { verifier, nonce, next, expiresAt }
 const pendingDeviceAuth = new Map(); // id -> { device_code, next, intervalSec, expiresAt }
+const sshInteractiveSessions = new Map(); // id -> { process, host, chunks, nextSeq, clients, ... }
 
 let msDiscoveryCache = null; // { fetchedAt, doc }
 let msJwksCache = null; // { fetchedAt, jwks }
+let telegramWebhookHealthState = loadTelegramWebhookHealthState();
+let cloudflaredTelegramAlertState = loadCloudflaredTelegramAlertState();
+let cloudflaredTelegramAlertRunning = false;
+
+const sshInteractiveCleanupTimer = setInterval(() => {
+  cleanupSshInteractiveSessions({ force: false });
+}, 60 * 1000);
+if (typeof sshInteractiveCleanupTimer?.unref === "function") {
+  sshInteractiveCleanupTimer.unref();
+}
+
+const cloudflaredTelegramAlertTimer = setInterval(() => {
+  void runCloudflaredTelegramAlertCheck("timer");
+}, cloudflaredTelegramAlertCheckIntervalMs);
+if (typeof cloudflaredTelegramAlertTimer?.unref === "function") {
+  cloudflaredTelegramAlertTimer.unref();
+}
+const cloudflaredTelegramAlertStartupTimer = setTimeout(() => {
+  void runCloudflaredTelegramAlertCheck("startup");
+}, cloudflaredTelegramAlertStartupDelayMs);
+if (typeof cloudflaredTelegramAlertStartupTimer?.unref === "function") {
+  cloudflaredTelegramAlertStartupTimer.unref();
+}
 
 const server = http.createServer(async (req, res) => {
   const method = req.method || "GET";
@@ -389,6 +490,12 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Telegram webhook ingress: public endpoint (no login), proxied to local bridge webhook server.
+  if (method === "POST" && cleanPath === telegramWebhookPublicPath) {
+    await handleTelegramWebhookProxy(req, res);
+    return;
+  }
+
   // 全站鉴权网关：未登录时页面跳转到 /login.html，API 返回 401
   const authUser = getAuthUserFromRequest(req);
   if (
@@ -438,6 +545,10 @@ const server = http.createServer(async (req, res) => {
     await handleGetSshPublicKey(req, res);
     return;
   }
+  if (method === "POST" && cleanPath === "/api/ssh/private-to-public") {
+    await handleSshPrivateToPublic(req, res);
+    return;
+  }
   if (method === "POST" && cleanPath === "/api/ssh/config") {
     await handleSaveSshConfig(req, res);
     return;
@@ -484,6 +595,22 @@ const server = http.createServer(async (req, res) => {
   }
   if (method === "POST" && cleanPath === "/api/ssh/download-archive") {
     await handleSshDownloadArchive(req, res);
+    return;
+  }
+  if (method === "POST" && cleanPath === "/api/ssh/interactive/start") {
+    await handleSshInteractiveStart(req, res);
+    return;
+  }
+  if (method === "POST" && cleanPath === "/api/ssh/interactive/input") {
+    await handleSshInteractiveInput(req, res);
+    return;
+  }
+  if (method === "POST" && cleanPath === "/api/ssh/interactive/stop") {
+    await handleSshInteractiveStop(req, res);
+    return;
+  }
+  if (method === "GET" && cleanPath === "/api/ssh/interactive/stream") {
+    await handleSshInteractiveStream(req, res);
     return;
   }
   if (method === "GET" && cleanPath === "/api/files/info") {
@@ -658,6 +785,18 @@ const server = http.createServer(async (req, res) => {
     await handlePostCloudflaredGuard(req, res);
     return;
   }
+  if (method === "POST" && cleanPath === "/api/cloudflared/telegram/test") {
+    await handlePostCloudflaredTelegramTest(req, res);
+    return;
+  }
+  if (method === "GET" && cleanPath === "/api/telegram/webhook/health") {
+    await handleGetTelegramWebhookHealth(req, res);
+    return;
+  }
+  if (method === "POST" && cleanPath === "/api/telegram/webhook/self-test") {
+    await handlePostTelegramWebhookSelfTest(req, res);
+    return;
+  }
   if (method === "GET" && cleanPath === "/api/services/dashboard") {
     await handleGetServicesDashboard(req, res);
     return;
@@ -673,6 +812,11 @@ const server = http.createServer(async (req, res) => {
 
   if (isFileManagerHostRequest(req) && (cleanPath === "/" || cleanPath === "/index.html")) {
     sendRedirect(res, 302, "/files.html");
+    return;
+  }
+
+  if (isGuestHostRequest(req) && (cleanPath === "/" || cleanPath === "/index.html" || cleanPath === "/services.html")) {
+    sendRedirect(res, 302, "/guest.html");
     return;
   }
 
@@ -1117,6 +1261,124 @@ async function handlePostCloudflaredGuard(req, res) {
     });
   } catch (error) {
     sendJson(res, 500, { error: error.message || "执行修复失败" });
+  }
+}
+
+async function handlePostCloudflaredTelegramTest(req, res) {
+  try {
+    const admin = getAdminUserFromRequest(req);
+    if (!admin) {
+      sendJson(res, 401, { error: "未授权：只有管理员可发送 Telegram 测试告警" });
+      return;
+    }
+
+    const payload = await readJsonBody(req).catch(() => ({}));
+    const target = resolveCloudflaredTelegramAlertTarget();
+    if (!target.enabled) {
+      sendJson(res, 400, { error: target.reason || "Telegram 告警未启用或配置不完整" });
+      return;
+    }
+
+    const snapshot = getCloudflaredGuardSnapshot();
+    const summary = snapshot?.summary || {};
+    const events = snapshot?.events || {};
+    const testText = [
+      "OpenClaw 隧道告警测试",
+      `时间：${new Date().toLocaleString("zh-CN", { hour12: false })}`,
+      `结论：${summary.label || "-"}`,
+      `说明：${summary.detail || "-"}`,
+      `15分钟掉线：${events.dropCount15m ?? "-"}`,
+      `自动恢复：${events.autoRecovered ? "是" : "否"}`,
+      payload?.note ? `备注：${String(payload.note).slice(0, 120)}` : ""
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const result = await sendTelegramTextToTargets(target, testText);
+    const statusCode = result.ok ? 200 : 502;
+    sendJson(res, statusCode, {
+      ok: result.ok,
+      target: {
+        apiBase: target.apiBase,
+        chatIds: target.chatIds
+      },
+      result
+    });
+  } catch (error) {
+    sendJson(res, 500, { error: error.message || "发送 Telegram 测试告警失败" });
+  }
+}
+
+async function handleGetTelegramWebhookHealth(req, res) {
+  try {
+    const snapshot = await buildTelegramWebhookHealthSnapshot(req);
+    sendJson(res, 200, snapshot);
+  } catch (error) {
+    sendJson(res, 500, { error: error.message || "读取 Telegram Webhook 状态失败" });
+  }
+}
+
+async function handlePostTelegramWebhookSelfTest(req, res) {
+  try {
+    const admin = getAdminUserFromRequest(req);
+    if (!admin) {
+      sendJson(res, 401, { error: "未授权：只有管理员可执行 Webhook 自检" });
+      return;
+    }
+
+    const telegramConfig = resolveTelegramWebhookHealthConfig();
+    if (!telegramConfig.telegram.enabled) {
+      sendJson(res, 400, { error: "telegram.enabled=false，当前未启用 Telegram" });
+      return;
+    }
+    if (telegramConfig.telegram.mode !== "webhook") {
+      sendJson(res, 400, { error: "当前不是 Webhook 模式（telegram.mode 不是 webhook）" });
+      return;
+    }
+    if (!telegramConfig.bridge.botTokenConfigured) {
+      sendJson(res, 400, { error: "Telegram botToken 未配置，无法做 Webhook 自检" });
+      return;
+    }
+
+    const payload = {
+      update_id: Math.floor(Date.now() / 1000),
+      webhook_health_check: true,
+      message: {
+        message_id: 0,
+        date: Math.floor(Date.now() / 1000),
+        text: "",
+        chat: { id: 0, type: "private" },
+        from: { id: 0, is_bot: true, first_name: "openclaw-check" }
+      }
+    };
+
+    const headers = {
+      "Content-Type": "application/json"
+    };
+    if (telegramConfig.bridge.secretConfigured && telegramConfig.bridge.secretToken) {
+      headers["X-Telegram-Bot-Api-Secret-Token"] = telegramConfig.bridge.secretToken;
+    }
+
+    const startedAt = Date.now();
+    const response = await fetch(`http://127.0.0.1:${port}${telegramWebhookPublicPath}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(telegramWebhookSelfTestTimeoutMs)
+    });
+    const durationMs = Math.max(0, Date.now() - startedAt);
+    const raw = await response.text();
+    const text = String(raw || "").trim();
+
+    sendJson(res, response.ok ? 200 : 502, {
+      ok: response.ok,
+      status: response.status,
+      durationMs,
+      responseSnippet: text.slice(0, 400),
+      snapshot: await buildTelegramWebhookHealthSnapshot(req)
+    });
+  } catch (error) {
+    sendJson(res, 500, { error: error.message || "执行 Webhook 自检失败" });
   }
 }
 
@@ -2019,6 +2281,85 @@ async function handleGuestChat(req, res) {
   }
 }
 
+async function handleTelegramWebhookProxy(req, res) {
+  const startedAt = Date.now();
+  const nowIso = new Date().toISOString();
+  const state = normalizeTelegramWebhookHealthState(telegramWebhookHealthState);
+  state.counters.received = clampInt((state.counters.received || 0) + 1, 1, 0, 1_000_000_000);
+  state.lastReceivedAt = nowIso;
+
+  try {
+    const rawBody = await readRawBody(req, { maxBytes: 2 * 1024 * 1024 });
+    const contentType = String(req.headers["content-type"] || "application/json").trim() || "application/json";
+    const secretToken = String(req.headers["x-telegram-bot-api-secret-token"] || "").trim();
+    const response = await fetch(telegramWebhookLocalUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": contentType,
+        ...(secretToken ? { "X-Telegram-Bot-Api-Secret-Token": secretToken } : {})
+      },
+      body: rawBody,
+      signal: AbortSignal.timeout(telegramWebhookProxyTimeoutMs)
+    });
+
+    const text = await response.text();
+    const durationMs = Math.max(0, Date.now() - startedAt);
+    if (response.ok) {
+      state.counters.forwarded = clampInt((state.counters.forwarded || 0) + 1, 1, 0, 1_000_000_000);
+      state.lastForwardedAt = nowIso;
+      state.lastError = "";
+      pushTelegramWebhookHealthEvent(state, {
+        time: nowIso,
+        type: "forwarded",
+        statusCode: response.status || 200,
+        durationMs,
+        detail: ""
+      });
+    } else {
+      const maybeSecretMismatch = response.status === 403;
+      if (maybeSecretMismatch) {
+        state.counters.secretMismatch = clampInt((state.counters.secretMismatch || 0) + 1, 1, 0, 1_000_000_000);
+        state.lastSecretMismatchAt = nowIso;
+      } else {
+        state.counters.failed = clampInt((state.counters.failed || 0) + 1, 1, 0, 1_000_000_000);
+        state.lastFailedAt = nowIso;
+      }
+      const compact = String(text || "").trim().slice(0, 240);
+      state.lastError = compact || `HTTP ${response.status || 502}`;
+      pushTelegramWebhookHealthEvent(state, {
+        time: nowIso,
+        type: maybeSecretMismatch ? "secret_mismatch" : "forward_failed",
+        statusCode: response.status || 502,
+        durationMs,
+        detail: compact
+      });
+    }
+    saveTelegramWebhookHealthState(state);
+
+    const payload = text || '{"ok":true}';
+    res.writeHead(response.status || 200, {
+      "Content-Type": String(response.headers.get("content-type") || "application/json; charset=utf-8"),
+      "Cache-Control": "no-store"
+    });
+    res.end(payload);
+  } catch (error) {
+    const durationMs = Math.max(0, Date.now() - startedAt);
+    const detail = formatErrorMessage(error);
+    state.counters.failed = clampInt((state.counters.failed || 0) + 1, 1, 0, 1_000_000_000);
+    state.lastFailedAt = nowIso;
+    state.lastError = detail.slice(0, 240);
+    pushTelegramWebhookHealthEvent(state, {
+      time: nowIso,
+      type: "proxy_error",
+      statusCode: 502,
+      durationMs,
+      detail: detail.slice(0, 240)
+    });
+    saveTelegramWebhookHealthState(state);
+    sendJson(res, 502, { error: `Telegram webhook 转发失败：${formatErrorMessage(error)}` });
+  }
+}
+
 function getAdminUserFromRequest(req) {
   const authUser = getAuthUserFromRequest(req);
   if (authUser && isEmailAllowedForAdmin(authUser.username || "")) {
@@ -2182,19 +2523,27 @@ function parseUrl(urlValue) {
 }
 
 function isFileManagerHostRequest(req) {
-  const rawHost = String(req?.headers?.host || "")
-    .trim()
-    .toLowerCase()
-    .split(":")[0];
-  return rawHost === "file.qxyx.net";
+  return getRequestHostName(req) === "file.qxyx.net";
 }
 
 function isClawHostRequest(req) {
-  const rawHost = String(req?.headers?.host || "")
+  return getRequestHostName(req) === "claw.qxyx.net";
+}
+
+function isGuestHostRequest(req) {
+  return getRequestHostName(req) === "guest.qxyx.net";
+}
+
+function getRequestHostName(req) {
+  const xfHost = String(req?.headers?.["x-forwarded-host"] || "")
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+  const hostHeader = xfHost || String(req?.headers?.host || "");
+  return hostHeader
     .trim()
     .toLowerCase()
     .split(":")[0];
-  return rawHost === "claw.qxyx.net";
 }
 
 function deriveFilePublicOrigin(req) {
@@ -2350,6 +2699,26 @@ async function handleGetSshPublicKey(req, res) {
   } catch (error) {
     const statusCode = error && Number.isInteger(error.statusCode) ? error.statusCode : 400;
     sendJson(res, statusCode, { error: error.message || "读取本机公钥失败" });
+  }
+}
+
+async function handleSshPrivateToPublic(req, res) {
+  try {
+    ensureTerminalToken(req);
+    if (!hasCommand("ssh-keygen")) {
+      sendJson(res, 400, { error: "本机未安装 ssh-keygen，无法从私钥自动生成公钥" });
+      return;
+    }
+    const payload = await readJsonBody(req, { maxBytes: 256 * 1024 });
+    const privateKeyText = sanitizeSshPrivateKeyText(String(payload?.privateKeyText || ""));
+    const publicKey = deriveSshPublicKeyFromPrivateKeyText(privateKeyText);
+    sendJson(res, 200, {
+      ok: true,
+      publicKey
+    });
+  } catch (error) {
+    const statusCode = error && Number.isInteger(error.statusCode) ? error.statusCode : 400;
+    sendJson(res, statusCode, { error: error.message || "从私钥生成公钥失败" });
   }
 }
 
@@ -3201,6 +3570,453 @@ async function handleSshDownloadArchive(req, res) {
     cleanupTempDirSafe(tempDir);
     const statusCode = error && Number.isInteger(error.statusCode) ? error.statusCode : 400;
     sendJson(res, statusCode, { error: error.message || "批量 zip 下载失败" });
+  }
+}
+
+async function handleSshInteractiveStart(req, res) {
+  try {
+    ensureTerminalToken(req);
+    if (!hasCommand("ssh")) {
+      sendJson(res, 400, { error: "本机未安装 ssh 命令" });
+      return;
+    }
+    cleanupSshInteractiveSessions({ force: false });
+    if (sshInteractiveSessions.size >= sshInteractiveMaxSessions) {
+      sendJson(res, 429, { error: `交互会话过多，请先关闭旧会话（上限 ${sshInteractiveMaxSessions}）` });
+      return;
+    }
+
+    const payload = await readJsonBody(req, { maxBytes: 128 * 1024 });
+    const hostId = String(payload?.hostId || "").trim();
+    if (!hostId) {
+      sendJson(res, 400, { error: "缺少 hostId" });
+      return;
+    }
+    const connectTimeoutSec = clampInt(payload?.connectTimeoutSec, sshDefaultConnectTimeoutSec, 1, 60);
+    const sessionPassword = String(payload?.sessionPassword || "");
+    const config = loadSshHostsConfig();
+    const host = (Array.isArray(config.hosts) ? config.hosts : []).find((item) => item.id === hostId && item.enabled !== false);
+    if (!host) {
+      sendJson(res, 404, { error: "主机不存在或已禁用" });
+      return;
+    }
+
+    const interactiveHost = sessionPassword
+      ? { ...host, runtimePassword: sessionPassword, password: sessionPassword }
+      : host;
+    const spawnOptions = buildSshInteractiveSpawnOptions(interactiveHost, { connectTimeoutSec });
+    const child = spawn(spawnOptions.command, spawnOptions.args, {
+      env: spawnOptions.env || process.env,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+
+    const sessionId = `sshi-${randomBase64Url(12)}`;
+    const session = {
+      id: sessionId,
+      hostId: host.id,
+      hostName: host.name || host.host,
+      hostTarget: `${host.user}@${host.host}:${host.port}`,
+      process: child,
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
+      closed: false,
+      closedEmitted: false,
+      exitCode: null,
+      signal: null,
+      closeReason: "",
+      closeDetail: "",
+      cleanup: typeof spawnOptions.cleanup === "function" ? spawnOptions.cleanup : null,
+      nextSeq: 1,
+      chunks: [],
+      clients: new Set()
+    };
+    sshInteractiveSessions.set(sessionId, session);
+
+    const appendChunk = (value) => {
+      const text = typeof value === "string" ? value : String(value || "");
+      if (!text) return;
+      pushSshInteractiveChunk(session, text);
+    };
+
+    child.stdout.on("data", (chunk) => {
+      session.lastActiveAt = Date.now();
+      appendChunk(Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk || ""));
+    });
+    child.stderr.on("data", (chunk) => {
+      session.lastActiveAt = Date.now();
+      appendChunk(Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk || ""));
+    });
+    child.on("error", (error) => {
+      session.lastActiveAt = Date.now();
+      appendChunk(`\r\n[error] ${error.message || "SSH 进程启动失败"}\r\n`);
+      finalizeSshInteractiveSession(session, {
+        exitCode: null,
+        signal: null,
+        reason: "process_error",
+        detail: String(error?.message || "")
+      });
+    });
+    child.on("close", (code, signal) => {
+      session.lastActiveAt = Date.now();
+      const reason = Number.isInteger(code)
+        ? `\r\n[session closed] exit=${code}${signal ? ` signal=${signal}` : ""}\r\n`
+        : `\r\n[session closed]${signal ? ` signal=${signal}` : ""}\r\n`;
+      appendChunk(reason);
+      finalizeSshInteractiveSession(session, {
+        exitCode: Number.isInteger(code) ? code : null,
+        signal: signal || null,
+        reason: "process_exit",
+        detail: Number.isInteger(code) ? `exit=${code}${signal ? ` signal=${signal}` : ""}` : (signal ? `signal=${signal}` : "")
+      });
+    });
+
+    sendJson(res, 200, {
+      ok: true,
+      sessionId,
+      host: {
+        id: host.id,
+        name: host.name,
+        user: host.user,
+        host: host.host,
+        port: host.port
+      },
+      connectTimeoutSec
+    });
+  } catch (error) {
+    const statusCode = error && Number.isInteger(error.statusCode) ? error.statusCode : 400;
+    sendJson(res, statusCode, { error: error.message || "创建交互终端失败" });
+  }
+}
+
+async function handleSshInteractiveInput(req, res) {
+  try {
+    ensureTerminalToken(req);
+    const payload = await readJsonBody(req, { maxBytes: 256 * 1024 });
+    const sessionId = String(payload?.sessionId || "").trim();
+    if (!sessionId) {
+      sendJson(res, 400, { error: "缺少 sessionId" });
+      return;
+    }
+    const session = sshInteractiveSessions.get(sessionId);
+    if (!session) {
+      sendJson(res, 404, { error: "会话不存在或已结束" });
+      return;
+    }
+    if (session.closed || !session.process || session.process.killed) {
+      sendJson(res, 410, { error: "会话已关闭" });
+      return;
+    }
+    const data = typeof payload?.data === "string" ? payload.data : String(payload?.data || "");
+    if (!data) {
+      sendJson(res, 200, { ok: true, wrote: 0 });
+      return;
+    }
+    if (data.length > 64 * 1024) {
+      sendJson(res, 413, { error: "输入过长，请分批发送" });
+      return;
+    }
+    session.lastActiveAt = Date.now();
+    session.process.stdin.write(data);
+    sendJson(res, 200, { ok: true, wrote: data.length });
+  } catch (error) {
+    const statusCode = error && Number.isInteger(error.statusCode) ? error.statusCode : 400;
+    sendJson(res, statusCode, { error: error.message || "写入交互终端失败" });
+  }
+}
+
+async function handleSshInteractiveStop(req, res) {
+  try {
+    ensureTerminalToken(req);
+    const payload = await readJsonBody(req, { maxBytes: 64 * 1024 });
+    const sessionId = String(payload?.sessionId || "").trim();
+    if (!sessionId) {
+      sendJson(res, 400, { error: "缺少 sessionId" });
+      return;
+    }
+    const session = sshInteractiveSessions.get(sessionId);
+    if (!session) {
+      sendJson(res, 200, { ok: true, closed: false });
+      return;
+    }
+    closeSshInteractiveSession(session, { reason: "manual_stop", kill: true });
+    sendJson(res, 200, { ok: true, closed: true });
+  } catch (error) {
+    const statusCode = error && Number.isInteger(error.statusCode) ? error.statusCode : 400;
+    sendJson(res, statusCode, { error: error.message || "关闭交互终端失败" });
+  }
+}
+
+async function handleSshInteractiveStream(req, res) {
+  try {
+    const { query } = parseUrl(req.url || "/api/ssh/interactive/stream");
+    if (terminalToken) {
+      const tokenInQuery = String(query.token || "").trim();
+      if (!tokenInQuery || tokenInQuery !== terminalToken) {
+        sendJson(res, 401, { error: "未授权：缺少或错误的终端 Token" });
+        return;
+      }
+    }
+    const sessionId = String(query.sessionId || "").trim();
+    if (!sessionId) {
+      sendJson(res, 400, { error: "缺少 sessionId" });
+      return;
+    }
+    const session = sshInteractiveSessions.get(sessionId);
+    if (!session) {
+      sendJson(res, 404, { error: "会话不存在或已结束" });
+      return;
+    }
+    const since = clampInt(query.since, 0, 0, Number.MAX_SAFE_INTEGER);
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no"
+    });
+    res.write("retry: 1000\n\n");
+
+    session.lastActiveAt = Date.now();
+    session.chunks.forEach((item) => {
+      if (Number(item.seq || 0) <= since) return;
+      writeSseEvent(res, "chunk", item);
+    });
+
+    if (session.closed) {
+      writeSseEvent(res, "close", {
+        sessionId: session.id,
+        exitCode: session.exitCode,
+        signal: session.signal,
+        reason: String(session.closeReason || ""),
+        detail: String(session.closeDetail || "")
+      });
+      res.end();
+      return;
+    }
+
+    const client = {
+      res,
+      heartbeat: setInterval(() => {
+        try {
+          res.write(": ping\n\n");
+        } catch (_error) {
+          // ignore
+        }
+      }, 15000)
+    };
+    if (typeof client.heartbeat?.unref === "function") client.heartbeat.unref();
+    session.clients.add(client);
+
+    const release = () => {
+      if (!session.clients.has(client)) return;
+      session.clients.delete(client);
+      try {
+        if (client.heartbeat) clearInterval(client.heartbeat);
+      } catch (_error) {
+        // ignore
+      }
+    };
+    req.on("close", release);
+    req.on("aborted", release);
+  } catch (error) {
+    const statusCode = error && Number.isInteger(error.statusCode) ? error.statusCode : 400;
+    sendJson(res, statusCode, { error: error.message || "连接交互终端流失败" });
+  }
+}
+
+function buildSshInteractiveSpawnOptions(host, options = {}) {
+  const connectTimeoutSec = clampInt(options?.connectTimeoutSec, sshDefaultConnectTimeoutSec, 1, 60);
+  const mode = normalizeSshAuthMode(host?.authMode, host?.runtimePassword || host?.password, host?.identityFile);
+  const identityFile = String(host?.identityFile || "").trim();
+  const password = String(host?.runtimePassword || host?.password || "");
+  const sshArgs = [
+    "-tt",
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", `ConnectTimeout=${connectTimeoutSec}`,
+    "-o", "ServerAliveInterval=20",
+    "-o", "ServerAliveCountMax=3",
+    "-o", "TCPKeepAlive=yes",
+    "-p", String(clampInt(host?.port, 22, 1, 65535))
+  ];
+  let env = { ...process.env };
+  let cleanup = () => {};
+
+  if (identityFile) {
+    const resolvedKey = expandHomeDir(identityFile);
+    if (!fs.existsSync(resolvedKey)) {
+      throw createHttpError(400, `私钥文件不存在：${resolvedKey}`);
+    }
+    sshArgs.push("-i", resolvedKey);
+  }
+  if (mode === "key") {
+    if (!identityFile) throw createHttpError(400, "该主机为仅私钥模式，但未配置私钥文件");
+    sshArgs.push("-o", "BatchMode=yes", "-o", "PreferredAuthentications=publickey", "-o", "NumberOfPasswordPrompts=0");
+  } else if (mode === "password") {
+    sshArgs.push(
+      "-o", "BatchMode=no",
+      "-o", "PreferredAuthentications=password,keyboard-interactive",
+      "-o", "PubkeyAuthentication=no",
+      "-o", "NumberOfPasswordPrompts=3"
+    );
+    if (password) {
+      const askpass = createSshAskpassEnv(password);
+      env = askpass.env;
+      cleanup = askpass.cleanup;
+    }
+  } else {
+    sshArgs.push(
+      "-o", "BatchMode=no",
+      "-o", "PreferredAuthentications=publickey,password,keyboard-interactive",
+      "-o", "NumberOfPasswordPrompts=3"
+    );
+    if (password) {
+      const askpass = createSshAskpassEnv(password);
+      env = askpass.env;
+      cleanup = askpass.cleanup;
+    }
+  }
+  sshArgs.push(buildSshTarget(host));
+
+  env = {
+    ...env,
+    TERM: env.TERM || process.env.TERM || "xterm-256color",
+    COLORTERM: env.COLORTERM || process.env.COLORTERM || "truecolor"
+  };
+
+  // Use util-linux `script` to allocate a PTY so password prompts / Ctrl+C / arrow keys behave like a real terminal.
+  if (commandExists("script")) {
+    const commandLine = ["ssh", ...sshArgs].map((arg) => quoteShellArg(arg)).join(" ");
+    return {
+      command: "script",
+      args: ["-q", "-f", "-c", commandLine, "/dev/null"],
+      env,
+      cleanup
+    };
+  }
+
+  return {
+    command: "ssh",
+    args: sshArgs,
+    env,
+    cleanup
+  };
+}
+
+function quoteShellArg(value) {
+  return `'${escapeShellSingleQuoted(String(value || ""))}'`;
+}
+
+function writeSseEvent(res, eventName, payload) {
+  const event = String(eventName || "message").trim() || "message";
+  const data = JSON.stringify(payload == null ? {} : payload);
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${data}\n\n`);
+}
+
+function pushSshInteractiveChunk(session, data) {
+  if (!session || session.closed) return;
+  const text = String(data || "");
+  if (!text) return;
+  const item = {
+    seq: Number(session.nextSeq || 1),
+    data: text
+  };
+  session.nextSeq = item.seq + 1;
+  session.chunks.push(item);
+  if (session.chunks.length > sshInteractiveMaxChunks) {
+    session.chunks.splice(0, session.chunks.length - sshInteractiveMaxChunks);
+  }
+  for (const client of Array.from(session.clients)) {
+    try {
+      writeSseEvent(client.res, "chunk", item);
+    } catch (_error) {
+      try {
+        if (client.heartbeat) clearInterval(client.heartbeat);
+      } catch (_ignored) {
+        // ignore
+      }
+      session.clients.delete(client);
+    }
+  }
+}
+
+function finalizeSshInteractiveSession(session, result = {}) {
+  if (!session || session.closedEmitted) return;
+  session.closedEmitted = true;
+  session.closed = true;
+  session.exitCode = result.exitCode ?? null;
+  session.signal = result.signal ?? null;
+  session.closeReason = String(result.reason || session.closeReason || "").trim();
+  session.closeDetail = String(result.detail || session.closeDetail || "").trim();
+  session.lastActiveAt = Date.now();
+  if (typeof session.cleanup === "function") {
+    try {
+      session.cleanup();
+    } catch (_error) {
+      // ignore cleanup failure
+    }
+    session.cleanup = null;
+  }
+  for (const client of Array.from(session.clients)) {
+    try {
+      writeSseEvent(client.res, "close", {
+        sessionId: session.id,
+        exitCode: session.exitCode,
+        signal: session.signal,
+        reason: session.closeReason,
+        detail: session.closeDetail
+      });
+    } catch (_error) {
+      // ignore
+    }
+    try {
+      if (client.heartbeat) clearInterval(client.heartbeat);
+    } catch (_ignored) {
+      // ignore
+    }
+    try {
+      client.res.end();
+    } catch (_ignored) {
+      // ignore
+    }
+    session.clients.delete(client);
+  }
+}
+
+function closeSshInteractiveSession(session, options = {}) {
+  if (!session) return;
+  if (options.kill !== false && session.process && !session.process.killed) {
+    try {
+      session.process.kill("SIGHUP");
+    } catch (_error) {
+      // ignore
+    }
+  }
+  if (!session.closed) {
+    const reason = String(options.reason || "").trim();
+    if (reason) {
+      pushSshInteractiveChunk(session, `\r\n[session stop] ${reason}\r\n`);
+    }
+    finalizeSshInteractiveSession(session, {
+      exitCode: session.exitCode,
+      signal: session.signal,
+      reason: reason || "session_stop",
+      detail: String(options.detail || "")
+    });
+  }
+  if (options.remove !== false) {
+    sshInteractiveSessions.delete(session.id);
+  }
+}
+
+function cleanupSshInteractiveSessions(options = {}) {
+  const force = !!options.force;
+  const now = Date.now();
+  for (const session of Array.from(sshInteractiveSessions.values())) {
+    const idleMs = Math.max(0, now - Number(session.lastActiveAt || session.createdAt || now));
+    const shouldClose = force || (session.closed ? idleMs > 2 * 60 * 1000 : idleMs > sshInteractiveSessionTtlMs);
+    if (!shouldClose) continue;
+    closeSshInteractiveSession(session, { reason: force ? "cleanup_force" : "idle_timeout", kill: true, remove: true });
   }
 }
 
@@ -4214,7 +5030,9 @@ function buildRemoteFileListScript(browsePath, showHidden) {
     "    kind='file'; size=$(wc -c < \"$item\" 2>/dev/null || printf '0')",
     "  fi",
     "  mtime=$(stat -c %Y \"$item\" 2>/dev/null || stat -f %m \"$item\" 2>/dev/null || date -r \"$item\" +%s 2>/dev/null || printf '0')",
-    "  printf 'ENTRY\\t%s\\t%s\\t%s\\t%s\\n' \"$kind\" \"$size\" \"$mtime\" \"$name\"",
+    "  perm=$(stat -c %A \"$item\" 2>/dev/null || stat -f %Sp \"$item\" 2>/dev/null || printf '-')",
+    "  owner_group=$(stat -c '%U/%G' \"$item\" 2>/dev/null || stat -f '%Su/%Sg' \"$item\" 2>/dev/null || printf '-')",
+    "  printf 'ENTRY\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"$kind\" \"$size\" \"$mtime\" \"$perm\" \"$owner_group\" \"$name\"",
     "}",
     "for item in \"$CWD\"/*; do emit_item \"$item\"; done",
     "if [ \"$SHOW_HIDDEN\" = '1' ]; then",
@@ -4379,13 +5197,17 @@ function parseRemoteFileListOutput(stdout) {
         const kind = String(parts[1] || "").trim();
         const size = Number.parseInt(String(parts[2] || "0"), 10);
         const mtimeSec = Number.parseInt(String(parts[3] || "0"), 10);
-        const name = parts.slice(4).join("\t");
+        const permission = parts.length >= 7 ? String(parts[4] || "").trim() : "";
+        const ownerGroup = parts.length >= 7 ? String(parts[5] || "").trim() : "";
+        const name = parts.length >= 7 ? parts.slice(6).join("\t") : parts.slice(4).join("\t");
         if (!name || name === "." || name === "..") return;
         result.entries.push({
           kind: kind === "dir" || kind === "symlink" ? kind : "file",
           name,
           size: Number.isFinite(size) ? size : 0,
-          mtimeSec: Number.isFinite(mtimeSec) ? mtimeSec : 0
+          mtimeSec: Number.isFinite(mtimeSec) ? mtimeSec : 0,
+          permission: permission || "-",
+          ownerGroup: ownerGroup || "-"
         });
       }
     });
@@ -4559,6 +5381,31 @@ function loadLocalPublicKey(preferredPath, inlineValue) {
   }
 
   throw createHttpError(404, "未找到本机公钥，请填写公钥内容或指定 .pub 路径");
+}
+
+function deriveSshPublicKeyFromPrivateKeyText(privateKeyText) {
+  let tempKeyPath = "";
+  try {
+    tempKeyPath = writeTempSshPrivateKey(privateKeyText);
+    const result = spawnSync("ssh-keygen", ["-y", "-f", tempKeyPath], {
+      encoding: "utf8",
+      timeout: 15000,
+      maxBuffer: 256 * 1024,
+      env: process.env
+    });
+    const stdout = String(result.stdout || "").trim();
+    const stderr = String(result.stderr || "").trim();
+    if (result.status !== 0 || !stdout) {
+      const detail = stderr || stdout || "ssh-keygen 执行失败";
+      throw createHttpError(400, detail);
+    }
+    if (!/^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521))\s+[A-Za-z0-9+/=]+(?:\s+.+)?$/.test(stdout)) {
+      throw createHttpError(400, "生成的公钥格式不正确，请确认私钥内容有效");
+    }
+    return stdout;
+  } finally {
+    cleanupFileSafe(tempKeyPath);
+  }
 }
 
 function buildAuthorizedKeyInstallScript(publicKey) {
@@ -8121,6 +8968,31 @@ function readJsonBody(req, options = {}) {
   });
 }
 
+function readRawBody(req, options = {}) {
+  return new Promise((resolve, reject) => {
+    const maxBytes = clampInt(options.maxBytes, 1024 * 1024, 1024, 50 * 1024 * 1024);
+    const chunks = [];
+    let total = 0;
+    let rejected = false;
+    req.on("data", (chunk) => {
+      if (rejected) return;
+      const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += data.length;
+      if (total > maxBytes) {
+        rejected = true;
+        reject(new Error("请求体过大"));
+        return;
+      }
+      chunks.push(data);
+    });
+    req.on("end", () => {
+      if (rejected) return;
+      resolve(Buffer.concat(chunks));
+    });
+    req.on("error", () => reject(new Error("读取请求体失败")));
+  });
+}
+
 function resolveFileManagerUploadMaxBytes(rawValue) {
   const text = String(rawValue ?? "").trim();
   if (!text) return 0;
@@ -8150,6 +9022,12 @@ function normalizeOptionalOrigin(input) {
   } catch (_error) {
     return "";
   }
+}
+
+function normalizeWebhookProxyPath(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return "/api/telegram/webhook";
+  return raw.startsWith("/") ? raw : `/${raw}`;
 }
 
 function streamRequestBodyToFile(req, targetPath, options = {}) {
@@ -9555,6 +10433,315 @@ function resolveSecretInput(rawValue, envMap) {
   return value;
 }
 
+function loadTelegramWebhookHealthState() {
+  try {
+    const raw = loadJsonFileSafe(telegramWebhookHealthStatePath);
+    return normalizeTelegramWebhookHealthState(raw);
+  } catch (_error) {
+    return normalizeTelegramWebhookHealthState({});
+  }
+}
+
+function normalizeTelegramWebhookHealthState(input) {
+  const source = input && typeof input === "object" ? input : {};
+  const counters = source.counters && typeof source.counters === "object" ? source.counters : {};
+  return {
+    version: 1,
+    counters: {
+      received: clampInt(counters.received, 0, 0, 1_000_000_000),
+      forwarded: clampInt(counters.forwarded, 0, 0, 1_000_000_000),
+      failed: clampInt(counters.failed, 0, 0, 1_000_000_000),
+      secretMismatch: clampInt(counters.secretMismatch, 0, 0, 1_000_000_000)
+    },
+    lastReceivedAt: String(source.lastReceivedAt || "").trim(),
+    lastForwardedAt: String(source.lastForwardedAt || "").trim(),
+    lastFailedAt: String(source.lastFailedAt || "").trim(),
+    lastSecretMismatchAt: String(source.lastSecretMismatchAt || "").trim(),
+    lastError: String(source.lastError || "").trim().slice(0, 240),
+    events: normalizeTelegramWebhookHealthEvents(source.events)
+  };
+}
+
+function normalizeTelegramWebhookHealthEvents(input) {
+  const list = Array.isArray(input) ? input : [];
+  return list
+    .map((item) => normalizeTelegramWebhookHealthEvent(item))
+    .filter(Boolean)
+    .slice(0, telegramWebhookHealthEventLimit);
+}
+
+function normalizeTelegramWebhookHealthEvent(input) {
+  const value = input && typeof input === "object" ? input : {};
+  const type = String(value.type || "").trim();
+  if (!type) return null;
+  return {
+    time: String(value.time || "").trim() || new Date().toISOString(),
+    type,
+    statusCode: clampInt(value.statusCode, 0, 0, 999),
+    durationMs: clampInt(value.durationMs, 0, 0, 60 * 60 * 1000),
+    detail: String(value.detail || "").trim().slice(0, 240)
+  };
+}
+
+function pushTelegramWebhookHealthEvent(state, input) {
+  const event = normalizeTelegramWebhookHealthEvent(input);
+  if (!event) return;
+  const list = Array.isArray(state.events) ? state.events : [];
+  state.events = [event, ...list].slice(0, telegramWebhookHealthEventLimit);
+}
+
+function saveTelegramWebhookHealthState(state) {
+  const normalized = normalizeTelegramWebhookHealthState(state);
+  telegramWebhookHealthState = normalized;
+  try {
+    fs.mkdirSync(path.dirname(telegramWebhookHealthStatePath), { recursive: true });
+    fs.writeFileSync(telegramWebhookHealthStatePath, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+  } catch (_error) {
+    // ignore
+  }
+}
+
+function normalizeBridgeWebhookPath(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return "/telegram/webhook";
+  return raw.startsWith("/") ? raw : `/${raw}`;
+}
+
+function extractPathFromUrl(input) {
+  const value = String(input || "").trim();
+  if (!value) return "";
+  try {
+    const parsed = new URL(value);
+    return normalizeWebhookProxyPath(parsed.pathname || "/");
+  } catch (_error) {
+    return "";
+  }
+}
+
+function resolveTelegramWebhookHealthConfig() {
+  const raw = fs.existsSync(bridgeConfigPath)
+    ? loadJsonFileSafe(bridgeConfigPath)
+    : loadJsonFileSafe(bridgeExampleConfigPath);
+  const value = raw && typeof raw === "object" ? raw : {};
+  const telegram = value.telegram && typeof value.telegram === "object" ? value.telegram : {};
+  const webhook = telegram.webhook && typeof telegram.webhook === "object" ? telegram.webhook : {};
+  const env = loadBridgeEnvForUi();
+
+  const mode = String(telegram.mode || "polling").trim().toLowerCase() === "webhook" ? "webhook" : "polling";
+  const apiBase = String(telegram.apiBase || "https://api.telegram.org")
+    .trim()
+    .replace(/\/+$/, "");
+  const botToken = resolveSecretInput(telegram.botToken, env);
+  const secretToken = resolveSecretInput(webhook.secretToken, env);
+  const publicUrl = String(webhook.publicUrl || process.env.TELEGRAM_WEBHOOK_PUBLIC_URL || "").trim();
+  const publicPathFromUrl = extractPathFromUrl(publicUrl);
+  const bridgePath = normalizeBridgeWebhookPath(webhook.path || "/telegram/webhook");
+  const listenHost = String(webhook.listenHost || "127.0.0.1").trim() || "127.0.0.1";
+  const listenPort = clampInt(webhook.listenPort, 4174, 1, 65535);
+  const localPathFromProxy = extractPathFromUrl(telegramWebhookLocalUrl);
+  const allowedChatCount = parseStringListFlexible(telegram.allowedChatIds).length;
+
+  return {
+    telegram: {
+      enabled: !!telegram.enabled,
+      mode,
+      apiBase: apiBase || "https://api.telegram.org",
+      allowedChatCount
+    },
+    bridge: {
+      botToken,
+      botTokenConfigured: !!botToken,
+      secretToken,
+      secretConfigured: !!secretToken,
+      webhookEnabled: webhook.enabled !== false,
+      publicUrl,
+      publicPathFromUrl,
+      bridgePath,
+      listenHost,
+      listenPort,
+      expectedLocalUrl: `http://${listenHost}:${listenPort}${bridgePath}`
+    },
+    proxy: {
+      publicPath: telegramWebhookPublicPath,
+      localUrl: telegramWebhookLocalUrl,
+      localPathFromProxy,
+      timeoutMs: telegramWebhookProxyTimeoutMs
+    },
+    checks: {
+      proxyPathMatchesPublicUrl: !publicPathFromUrl || publicPathFromUrl === telegramWebhookPublicPath,
+      proxyLocalPathMatchesBridgePath: !localPathFromProxy || localPathFromProxy === bridgePath
+    }
+  };
+}
+
+function buildTelegramWebhookHealthSummary(config, state, telegramApi) {
+  const counters = state?.counters || {};
+  const received = Number(counters.received || 0);
+  const forwarded = Number(counters.forwarded || 0);
+  const failed = Number(counters.failed || 0);
+  const mismatch = Number(counters.secretMismatch || 0);
+  let tone = "good";
+  let label = "Webhook 运行正常";
+  let detail = `累计接收 ${received}，成功转发 ${forwarded}，失败 ${failed}，密钥不匹配 ${mismatch}。`;
+
+  if (!config.telegram.enabled) {
+    tone = "warn";
+    label = "Telegram 未启用";
+    detail = "bridge.config.json 中 telegram.enabled=false，当前不会接收 Telegram 回调。";
+    return { tone, label, detail };
+  }
+  if (config.telegram.mode !== "webhook") {
+    tone = "warn";
+    label = "当前不是 Webhook 模式";
+    detail = "telegram.mode 不是 webhook，请切到 webhook 才能使用该自检页。";
+    return { tone, label, detail };
+  }
+  if (!config.bridge.botTokenConfigured) {
+    tone = "danger";
+    label = "Bot Token 未配置";
+    detail = "telegram.botToken 为空（或引用的环境变量不存在），Webhook 无法正常工作。";
+    return { tone, label, detail };
+  }
+  if (failed > 0 && failed >= Math.max(1, forwarded)) {
+    tone = "warn";
+    label = "Webhook 存在失败记录";
+  } else if (received === 0) {
+    tone = "warn";
+    label = "Webhook 已配置，尚未收到回调";
+  }
+  if (telegramApi?.ok && telegramApi?.lastErrorMessage) {
+    tone = tone === "good" ? "warn" : tone;
+    label = tone === "warn" ? "Telegram 官方返回最近错误" : label;
+  }
+  return { tone, label, detail };
+}
+
+function toIsoFromUnixSeconds(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return "";
+  const date = new Date(seconds * 1000);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toISOString();
+}
+
+async function fetchTelegramWebhookInfoForHealth(config) {
+  if (!config?.bridge?.botToken) {
+    return {
+      ok: false,
+      error: "botToken 未配置，无法调用 getWebhookInfo"
+    };
+  }
+  try {
+    const endpoint = `${config.telegram.apiBase}/bot${config.bridge.botToken}/getWebhookInfo`;
+    const data = await requestJson(endpoint, {
+      method: "GET",
+      timeoutMs: 25000
+    });
+    if (!data?.ok) {
+      throw new Error(String(data?.description || "Telegram 返回失败"));
+    }
+    const result = data.result && typeof data.result === "object" ? data.result : {};
+    return {
+      ok: true,
+      url: String(result.url || "").trim(),
+      hasCustomCertificate: !!result.has_custom_certificate,
+      pendingUpdateCount: clampInt(result.pending_update_count, 0, 0, 1_000_000_000),
+      maxConnections: clampInt(result.max_connections, 0, 0, 500),
+      ipAddress: String(result.ip_address || "").trim(),
+      allowedUpdates: Array.isArray(result.allowed_updates) ? result.allowed_updates.map((item) => String(item || "").trim()).filter(Boolean) : [],
+      lastErrorDate: toIsoFromUnixSeconds(result.last_error_date),
+      lastErrorMessage: String(result.last_error_message || "").trim(),
+      lastSyncErrorDate: toIsoFromUnixSeconds(result.last_synchronization_error_date)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: formatErrorMessage(error)
+    };
+  }
+}
+
+function deriveTelegramWebhookWarnings(config, state, telegramApi) {
+  const warnings = [];
+  if (!config.telegram.enabled) warnings.push("Telegram 未启用（telegram.enabled=false）");
+  if (config.telegram.mode !== "webhook") warnings.push("Telegram 当前不是 Webhook 模式");
+  if (!config.bridge.botTokenConfigured) warnings.push("telegram.botToken 未配置或环境变量为空");
+  if (!config.bridge.publicUrl) warnings.push("telegram.webhook.publicUrl 为空");
+  if (!config.checks.proxyPathMatchesPublicUrl) {
+    warnings.push(`公网 URL 路径与代理入口不一致：${config.bridge.publicPathFromUrl} vs ${config.proxy.publicPath}`);
+  }
+  if (!config.checks.proxyLocalPathMatchesBridgePath) {
+    warnings.push(`代理本地路径与 bridge webhook.path 不一致：${config.proxy.localPathFromProxy} vs ${config.bridge.bridgePath}`);
+  }
+  if (Number(state?.counters?.secretMismatch || 0) > 0) {
+    warnings.push("历史上出现过 secret_token 不匹配，请确认 TG_WEBHOOK_SECRET 与 bridge 配置一致");
+  }
+  if (telegramApi?.ok && telegramApi?.lastErrorMessage) {
+    warnings.push(`Telegram 官方最近错误：${telegramApi.lastErrorMessage}`);
+  } else if (telegramApi && !telegramApi.ok) {
+    warnings.push(`Telegram 官方状态读取失败：${telegramApi.error || "unknown"}`);
+  }
+  return warnings;
+}
+
+async function buildTelegramWebhookHealthSnapshot(req) {
+  const config = resolveTelegramWebhookHealthConfig();
+  const state = normalizeTelegramWebhookHealthState(telegramWebhookHealthState);
+  const telegramApi = await fetchTelegramWebhookInfoForHealth(config);
+  const summary = buildTelegramWebhookHealthSummary(config, state, telegramApi);
+  const warnings = deriveTelegramWebhookWarnings(config, state, telegramApi);
+
+  return {
+    ok: true,
+    now: new Date().toISOString(),
+    summary,
+    warnings,
+    proxy: {
+      publicPath: config.proxy.publicPath,
+      localUrl: config.proxy.localUrl,
+      timeoutMs: config.proxy.timeoutMs
+    },
+    bridge: {
+      service: getBridgeServiceStatus(),
+      telegram: {
+        enabled: config.telegram.enabled,
+        mode: config.telegram.mode,
+        apiBase: config.telegram.apiBase,
+        allowedChatCount: config.telegram.allowedChatCount,
+        botTokenConfigured: config.bridge.botTokenConfigured,
+        webhook: {
+          enabled: config.bridge.webhookEnabled,
+          publicUrl: config.bridge.publicUrl,
+          hasSecretToken: config.bridge.secretConfigured,
+          path: config.bridge.bridgePath,
+          listenHost: config.bridge.listenHost,
+          listenPort: config.bridge.listenPort,
+          expectedLocalUrl: config.bridge.expectedLocalUrl
+        }
+      }
+    },
+    checks: config.checks,
+    counters: state.counters,
+    latest: {
+      lastReceivedAt: state.lastReceivedAt,
+      lastForwardedAt: state.lastForwardedAt,
+      lastFailedAt: state.lastFailedAt,
+      lastSecretMismatchAt: state.lastSecretMismatchAt,
+      lastError: state.lastError
+    },
+    events: state.events.slice(0, 50),
+    telegramApi,
+    paths: {
+      healthStatePath: telegramWebhookHealthStatePath,
+      bridgeConfigPath,
+      bridgeEnvPath
+    },
+    origin: {
+      requestOrigin: getRequestOrigin(req)
+    }
+  };
+}
+
 function getServicesDashboardSnapshot(req) {
   const localOrigin127 = `http://127.0.0.1:${port}`;
   const localOriginLocalhost = `http://localhost:${port}`;
@@ -9640,6 +10827,7 @@ function getServicesDashboardSnapshot(req) {
         makeDashboardLink("节点转换器", `${vpnOrigin}/vpn-convert.html`, "订阅链接、原始节点转 Clash / Base64", vpnLinkKind),
         makeDashboardLink("订阅管理", `${vpnOrigin}/vpn-subscriptions.html`, "批量管理常用订阅链接", vpnLinkKind),
         makeDashboardLink("隧道巡检", `${appOrigin}/cloudflared.html`, "检查 cloudflared 是否 DIRECT", appLinkKind),
+        makeDashboardLink("Webhook 自检", `${appOrigin}/telegram-webhook.html`, "检查 Telegram Webhook 连通性与回调统计", appLinkKind),
         makeDashboardLink("网络检测", `${appOrigin}/network.html`, "判断访问链路更像国内还是国外", appLinkKind),
         makeDashboardLink("管理员", `${appOrigin}/admin.html`, "访客链接与管理入口", appLinkKind),
         makeDashboardLink("文件管理", `${appOrigin}/files.html`, "文件上传下载与预览", appLinkKind),
@@ -9851,6 +11039,7 @@ function getCloudflaredGuardSnapshot() {
   const directStatus = getCloudflaredDirectConnectionsStatus();
   const overrideStatus = getCloudflaredOverrideStatus();
   const log = readCloudflaredGuardLogTail(40);
+  const eventHealth = getCloudflaredTunnelEventHealth();
   const activeTunnelCount = services.filter((item) => item.active).length;
 
   let tone = "warn";
@@ -9878,6 +11067,16 @@ function getCloudflaredGuardSnapshot() {
     label = "暂无 cloudflared 连接";
     detail = "未从 Mihomo 连接表看到 cloudflared，可能当前没有公网访问流量。";
   }
+  if (eventHealth.available) {
+    if (eventHealth.dropCount15m > 0 && !eventHealth.autoRecovered) {
+      tone = "danger";
+      label = "隧道最近有掉线且未恢复";
+      detail = `最近 15 分钟掉线 ${eventHealth.dropCount15m} 次，最近 1 小时掉线 ${eventHealth.dropCount60m} 次。`;
+    } else if (eventHealth.dropCount60m > 0) {
+      if (tone === "good") tone = "warn";
+      detail = `${detail} 最近 1 小时掉线 ${eventHealth.dropCount60m} 次，已自动恢复。`;
+    }
+  }
 
   return {
     ok: true,
@@ -9894,6 +11093,10 @@ function getCloudflaredGuardSnapshot() {
       scriptPath: cloudflaredGuardScriptPath,
       logPath: cloudflaredGuardLogPath
     },
+    alert: {
+      telegram: getCloudflaredTelegramAlertPublicState()
+    },
+    events: eventHealth,
     mihomo: directStatus,
     override: overrideStatus,
     log
@@ -10144,6 +11347,371 @@ function readCloudflaredGuardLogTail(maxLines = 40) {
     exists: fs.existsSync(cloudflaredGuardLogPath),
     lines: lines.slice(-Math.max(1, maxLines)),
     updatedAt: getFileIsoMtime(cloudflaredGuardLogPath)
+  };
+}
+
+function getCloudflaredTunnelEventHealth() {
+  if (!commandExists("journalctl")) {
+    return {
+      available: false,
+      tone: "warn",
+      healthLabel: "无法读取日志",
+      summary: "系统缺少 journalctl，无法统计隧道健康事件。",
+      lookbackHours: cloudflaredEventLookbackHours,
+      dropCount15m: 0,
+      dropCount60m: 0,
+      dropCount24h: 0,
+      retryCount24h: 0,
+      recoverCount24h: 0,
+      autoRecovered: false,
+      lastDropAt: "",
+      lastRecoverAt: "",
+      lastRetryAt: "",
+      recentEvents: []
+    };
+  }
+
+  const result = spawnSync("journalctl", [
+    "--user",
+    ...cloudflaredServiceNames.flatMap((unit) => ["-u", unit]),
+    "--since",
+    `${cloudflaredEventLookbackHours} hours ago`,
+    "--no-pager",
+    "--output=short-iso"
+  ], {
+    encoding: "utf8"
+  });
+
+  const raw = String(result.stdout || "").trim();
+  const lines = raw ? raw.split(/\r?\n/) : [];
+  const nowMs = Date.now();
+  const window15m = 15 * 60 * 1000;
+  const window60m = 60 * 60 * 1000;
+  const window24h = cloudflaredEventLookbackHours * 60 * 60 * 1000;
+
+  const events = [];
+  for (const line of lines) {
+    const event = parseCloudflaredEventLine(line);
+    if (event) events.push(event);
+  }
+
+  const dropEvents = events.filter((item) => item.type === "drop");
+  const retryEvents = events.filter((item) => item.type === "retry");
+  const recoverEvents = events.filter((item) => item.type === "recover");
+
+  const dropCount15m = dropEvents.filter((item) => nowMs - item.timestampMs <= window15m).length;
+  const dropCount60m = dropEvents.filter((item) => nowMs - item.timestampMs <= window60m).length;
+  const dropCount24h = dropEvents.filter((item) => nowMs - item.timestampMs <= window24h).length;
+  const retryCount24h = retryEvents.filter((item) => nowMs - item.timestampMs <= window24h).length;
+  const recoverCount24h = recoverEvents.filter((item) => nowMs - item.timestampMs <= window24h).length;
+  const lastDropAt = getLastEventIso(dropEvents);
+  const lastRecoverAt = getLastEventIso(recoverEvents);
+  const lastRetryAt = getLastEventIso(retryEvents);
+  const autoRecovered = !!(lastDropAt && lastRecoverAt && Date.parse(lastRecoverAt) > Date.parse(lastDropAt));
+
+  let tone = "good";
+  let healthLabel = "稳定";
+  let summary = "最近未发现掉线异常。";
+  if (dropCount15m > 0 && !autoRecovered) {
+    tone = "danger";
+    healthLabel = "波动中";
+    summary = `最近 15 分钟掉线 ${dropCount15m} 次，暂未观测到恢复事件。`;
+  } else if (dropCount15m > 0) {
+    tone = "warn";
+    healthLabel = "有波动已恢复";
+    summary = `最近 15 分钟掉线 ${dropCount15m} 次，当前已自动恢复。`;
+  } else if (dropCount60m > 0) {
+    tone = "warn";
+    healthLabel = "最近有波动";
+    summary = `最近 1 小时掉线 ${dropCount60m} 次，当前已恢复。`;
+  }
+
+  return {
+    available: true,
+    tone,
+    healthLabel,
+    summary,
+    lookbackHours: cloudflaredEventLookbackHours,
+    dropCount15m,
+    dropCount60m,
+    dropCount24h,
+    retryCount24h,
+    recoverCount24h,
+    autoRecovered,
+    lastDropAt,
+    lastRecoverAt,
+    lastRetryAt,
+    recentEvents: events.slice(-25).reverse()
+  };
+}
+
+function parseCloudflaredEventLine(line) {
+  const text = String(line || "").trim();
+  if (!text) return null;
+  const lower = text.toLowerCase();
+  let type = "";
+  if (lower.includes("registered tunnel connection")) {
+    type = "recover";
+  } else if (lower.includes("retrying connection")) {
+    type = "retry";
+  } else if (cloudflaredDropEventKeywords.some((keyword) => lower.includes(keyword))) {
+    type = "drop";
+  }
+  if (!type) return null;
+
+  const isoMatch = text.match(/(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/);
+  const iso = isoMatch ? isoMatch[1] : "";
+  const timestampMs = iso ? Date.parse(iso) : NaN;
+  if (!Number.isFinite(timestampMs)) return null;
+
+  return {
+    type,
+    time: new Date(timestampMs).toISOString(),
+    timestampMs,
+    message: text
+  };
+}
+
+function getLastEventIso(events) {
+  if (!Array.isArray(events) || !events.length) return "";
+  const last = events[events.length - 1];
+  return String(last?.time || "").trim();
+}
+
+function getCloudflaredTelegramAlertPublicState() {
+  const target = resolveCloudflaredTelegramAlertTarget();
+  const state = normalizeCloudflaredTelegramAlertState(cloudflaredTelegramAlertState);
+  return {
+    enabled: target.enabled,
+    reason: target.reason || "",
+    apiBase: target.apiBase || "",
+    chatCount: Array.isArray(target.chatIds) ? target.chatIds.length : 0,
+    running: cloudflaredTelegramAlertRunning,
+    checkIntervalMs: cloudflaredTelegramAlertCheckIntervalMs,
+    minIntervalMs: cloudflaredTelegramAlertMinIntervalMs,
+    consecutiveThreshold: cloudflaredTelegramAlertConsecutiveThreshold,
+    consecutiveUnhealthy: state.consecutiveUnhealthy,
+    lastStatus: state.lastStatus,
+    lastObservedAt: state.lastObservedAt,
+    lastAlertAt: state.lastAlertAt,
+    lastRecoveryAt: state.lastRecoveryAt,
+    lastSendError: state.lastSendError
+  };
+}
+
+function loadCloudflaredTelegramAlertState() {
+  try {
+    const raw = loadJsonFileSafe(cloudflaredTelegramAlertStatePath);
+    return normalizeCloudflaredTelegramAlertState(raw);
+  } catch (_error) {
+    return normalizeCloudflaredTelegramAlertState({});
+  }
+}
+
+function normalizeCloudflaredTelegramAlertState(input) {
+  const source = input && typeof input === "object" ? input : {};
+  return {
+    version: 1,
+    lastStatus: String(source.lastStatus || "unknown").trim() || "unknown",
+    consecutiveUnhealthy: clampInt(source.consecutiveUnhealthy, 0, 0, 100000),
+    lastObservedAt: String(source.lastObservedAt || "").trim(),
+    lastAlertKey: String(source.lastAlertKey || "").trim(),
+    lastAlertAt: String(source.lastAlertAt || "").trim(),
+    lastRecoveryKey: String(source.lastRecoveryKey || "").trim(),
+    lastRecoveryAt: String(source.lastRecoveryAt || "").trim(),
+    alerting: source.alerting === true,
+    lastSendError: String(source.lastSendError || "").trim()
+  };
+}
+
+function saveCloudflaredTelegramAlertState(state) {
+  const normalized = normalizeCloudflaredTelegramAlertState(state);
+  cloudflaredTelegramAlertState = normalized;
+  try {
+    fs.mkdirSync(path.dirname(cloudflaredTelegramAlertStatePath), { recursive: true });
+    fs.writeFileSync(cloudflaredTelegramAlertStatePath, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+  } catch (_error) {
+    // ignore
+  }
+}
+
+function resolveCloudflaredTelegramAlertTarget() {
+  const bridgeConfig = loadBridgeConfigForUi();
+  const env = loadBridgeEnvForUi();
+  const enabled = parseBooleanEnv(
+    process.env.OPENCLAW_CLOUDFLARED_TG_ALERT_ENABLED,
+    bridgeConfig.telegram.enabled
+  );
+  const apiBase = String(
+    process.env.OPENCLAW_CLOUDFLARED_TG_ALERT_API_BASE || bridgeConfig.telegram.apiBase || "https://api.telegram.org"
+  )
+    .trim()
+    .replace(/\/+$/, "");
+  const tokenInput =
+    String(process.env.OPENCLAW_CLOUDFLARED_TG_ALERT_BOT_TOKEN || "").trim() || bridgeConfig.telegram.botToken;
+  const botToken = resolveSecretInput(tokenInput, env);
+  const chatIdsFromEnv = parseStringListFlexible(process.env.OPENCLAW_CLOUDFLARED_TG_ALERT_CHAT_IDS || "");
+  const chatIds = (chatIdsFromEnv.length ? chatIdsFromEnv : bridgeConfig.telegram.allowedChatIds || [])
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+
+  if (!enabled) {
+    return { enabled: false, reason: "已关闭（OPENCLAW_CLOUDFLARED_TG_ALERT_ENABLED=0）", apiBase, botToken: "", chatIds: [] };
+  }
+  if (!botToken) {
+    return { enabled: false, reason: "缺少 Telegram Bot Token", apiBase, botToken: "", chatIds: [] };
+  }
+  if (!chatIds.length) {
+    return { enabled: false, reason: "未配置 Telegram chatId 白名单", apiBase, botToken: "", chatIds: [] };
+  }
+  return { enabled: true, reason: "", apiBase, botToken, chatIds };
+}
+
+async function runCloudflaredTelegramAlertCheck(trigger = "timer") {
+  if (cloudflaredTelegramAlertRunning) return;
+  cloudflaredTelegramAlertRunning = true;
+  try {
+    const target = resolveCloudflaredTelegramAlertTarget();
+    if (!target.enabled) return;
+
+    const snapshot = getCloudflaredGuardSnapshot();
+    const summary = snapshot?.summary || {};
+    const events = snapshot?.events || {};
+    const nowIso = new Date().toISOString();
+    const nowMs = Date.now();
+    const state = normalizeCloudflaredTelegramAlertState(cloudflaredTelegramAlertState);
+    const lastAlertAtMs = state.lastAlertAt ? Date.parse(state.lastAlertAt) : 0;
+    const lastRecoveryAtMs = state.lastRecoveryAt ? Date.parse(state.lastRecoveryAt) : 0;
+    const wasAlerting = state.alerting === true;
+    const unhealthy =
+      summary.tone === "danger" || (Number(events.dropCount15m || 0) > 0 && events.autoRecovered !== true);
+
+    state.lastObservedAt = nowIso;
+    state.lastStatus = unhealthy ? "danger" : "good";
+
+    if (unhealthy) {
+      state.consecutiveUnhealthy = clampInt((state.consecutiveUnhealthy || 0) + 1, 1, 0, 100000);
+      const thresholdReached = state.consecutiveUnhealthy >= cloudflaredTelegramAlertConsecutiveThreshold;
+      state.alerting = thresholdReached || wasAlerting;
+      const alertKey = `${events.lastDropAt || "none"}|${events.dropCount15m || 0}|${summary.label || ""}`;
+      const shouldSend = state.alerting && alertKey !== state.lastAlertKey && nowMs - lastAlertAtMs >= cloudflaredTelegramAlertMinIntervalMs;
+      if (shouldSend) {
+        const text = buildCloudflaredTelegramAlertText(snapshot, trigger);
+        const sent = await sendTelegramTextToTargets(target, text, { disableNotification: false });
+        if (sent.ok) {
+          state.lastAlertKey = alertKey;
+          state.lastAlertAt = nowIso;
+          state.lastSendError = "";
+        } else {
+          state.lastSendError = sent.failures.map((item) => `${item.chatId}: ${item.error}`).join(" | ").slice(0, 500);
+        }
+      }
+      saveCloudflaredTelegramAlertState(state);
+      return;
+    }
+
+    state.consecutiveUnhealthy = 0;
+
+    if (state.alerting) {
+      const recoverKey = `${events.lastRecoverAt || nowIso}|${summary.label || "ok"}`;
+      const shouldSendRecovery =
+        recoverKey !== state.lastRecoveryKey && nowMs - lastRecoveryAtMs >= Math.max(60 * 1000, cloudflaredTelegramAlertMinIntervalMs / 2);
+      if (shouldSendRecovery) {
+        const text = buildCloudflaredTelegramRecoveryText(snapshot, trigger);
+        const sent = await sendTelegramTextToTargets(target, text, { disableNotification: true });
+        if (sent.ok) {
+          state.lastRecoveryKey = recoverKey;
+          state.lastRecoveryAt = nowIso;
+          state.alerting = false;
+          state.lastSendError = "";
+        } else {
+          state.lastSendError = sent.failures.map((item) => `${item.chatId}: ${item.error}`).join(" | ").slice(0, 500);
+        }
+      }
+    }
+
+    saveCloudflaredTelegramAlertState(state);
+  } catch (error) {
+    const state = normalizeCloudflaredTelegramAlertState(cloudflaredTelegramAlertState);
+    state.lastSendError = String(error?.message || error || "unknown").trim().slice(0, 500);
+    state.lastObservedAt = new Date().toISOString();
+    saveCloudflaredTelegramAlertState(state);
+  } finally {
+    cloudflaredTelegramAlertRunning = false;
+  }
+}
+
+function buildCloudflaredTelegramAlertText(snapshot, trigger) {
+  const summary = snapshot?.summary || {};
+  const events = snapshot?.events || {};
+  const state = normalizeCloudflaredTelegramAlertState(cloudflaredTelegramAlertState);
+  return [
+    "OpenClaw 隧道告警",
+    `时间：${new Date().toLocaleString("zh-CN", { hour12: false })}`,
+    `触发：${trigger}`,
+    `状态：${summary.label || "异常"}`,
+    `详情：${summary.detail || "-"}`,
+    `连续异常：${state.consecutiveUnhealthy}/${cloudflaredTelegramAlertConsecutiveThreshold}`,
+    `15分钟掉线：${events.dropCount15m ?? "-"}`,
+    `1小时掉线：${events.dropCount60m ?? "-"}`,
+    `最后掉线：${events.lastDropAt ? new Date(events.lastDropAt).toLocaleString("zh-CN", { hour12: false }) : "-"}`,
+    `自动恢复：${events.autoRecovered ? "是" : "否"}`
+  ].join("\n");
+}
+
+function buildCloudflaredTelegramRecoveryText(snapshot, trigger) {
+  const summary = snapshot?.summary || {};
+  const events = snapshot?.events || {};
+  return [
+    "OpenClaw 隧道恢复",
+    `时间：${new Date().toLocaleString("zh-CN", { hour12: false })}`,
+    `触发：${trigger}`,
+    `状态：${summary.label || "已恢复"}`,
+    `详情：${summary.detail || "-"}`,
+    `最近15分钟掉线：${events.dropCount15m ?? "-"}`,
+    `最后恢复：${events.lastRecoverAt ? new Date(events.lastRecoverAt).toLocaleString("zh-CN", { hour12: false }) : "-"}`
+  ].join("\n");
+}
+
+async function sendTelegramTextToTargets(target, text, options = {}) {
+  const payloadText = String(text || "").trim();
+  if (!payloadText) {
+    return { ok: false, sent: 0, failed: 0, failures: [{ chatId: "", error: "消息内容为空" }] };
+  }
+  const endpoint = `${target.apiBase}/bot${target.botToken}/sendMessage`;
+  const failures = [];
+  let sent = 0;
+
+  for (const chatId of target.chatIds) {
+    try {
+      const data = await requestJson(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        timeoutMs: 30000,
+        body: {
+          chat_id: chatId,
+          text: payloadText,
+          disable_notification: options.disableNotification === true,
+          disable_web_page_preview: true
+        }
+      });
+      if (!data?.ok) {
+        throw new Error(String(data?.description || "Telegram 返回失败"));
+      }
+      sent += 1;
+    } catch (error) {
+      failures.push({
+        chatId,
+        error: String(error?.message || error || "unknown").trim().slice(0, 240)
+      });
+    }
+  }
+
+  return {
+    ok: sent > 0 && failures.length === 0,
+    sent,
+    failed: failures.length,
+    failures
   };
 }
 

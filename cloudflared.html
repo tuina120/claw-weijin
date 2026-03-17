@@ -3,14 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>OpenClaw Cloudflared 巡检</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Noto+Sans+SC:wght@400;500;700&display=swap"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="./cloudflared.css" />
+    <title>OpenClaw Cloudflared 巡检</title><link rel="stylesheet" href="./cloudflared.css" />
   </head>
   <body class="cloudflared-body">
     <main class="page">
@@ -35,6 +28,7 @@
           <button id="refresh-btn" class="btn btn-primary" type="button">刷新状态</button>
           <button id="repair-btn" class="btn btn-warning" type="button">立即修复</button>
           <button id="restart-btn" class="btn btn-ghost" type="button">重启隧道</button>
+          <button id="telegram-test-btn" class="btn btn-ghost" type="button">测试 Telegram 告警</button>
           <button id="copy-btn" class="btn btn-ghost" type="button">复制结果</button>
         </div>
       </section>
@@ -56,6 +50,11 @@
           <div class="stat-label">隧道服务</div>
           <div id="service-status" class="stat-value">--</div>
           <div id="service-detail" class="stat-detail">等待读取</div>
+        </article>
+        <article class="stat-card">
+          <div class="stat-label">隧道健康</div>
+          <div id="event-status" class="stat-value">--</div>
+          <div id="event-detail" class="stat-detail">等待读取</div>
         </article>
       </section>
 
@@ -84,6 +83,15 @@
           <span class="panel-tip">override / profile / work 规则</span>
         </div>
         <dl class="kv-list" id="override-kv"></dl>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>隧道健康事件</h2>
+          <span class="panel-tip">最近 24 小时掉线 / 重连统计</span>
+        </div>
+        <dl class="kv-list" id="event-kv"></dl>
+        <div id="event-list" class="list-block"></div>
       </section>
 
       <section class="panel">

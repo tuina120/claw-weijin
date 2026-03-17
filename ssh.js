@@ -36,6 +36,12 @@ const PRESET_GROUPS = [
   }
 ];
 
+const REMOTE_TREE_INDENT_PX = 16;
+const INTERACTIVE_STREAM_RECONNECT_MAX = 6;
+const INTERACTIVE_STREAM_RECONNECT_BASE_MS = 1200;
+const INTERACTIVE_SESSION_RECOVER_MAX = 3;
+const INTERACTIVE_SESSION_RECOVER_BASE_MS = 2000;
+
 const nodes = {
   reloadBtn: document.getElementById("ssh-reload-btn"),
   saveBtn: document.getElementById("ssh-save-btn"),
@@ -46,10 +52,13 @@ const nodes = {
   defaultConnectTimeout: document.getElementById("ssh-default-connect-timeout"),
   defaultCommandTimeout: document.getElementById("ssh-default-command-timeout"),
   search: document.getElementById("ssh-search-input"),
+  sessionTabs: document.getElementById("ssh-session-tabs"),
+  newSessionTabBtn: document.getElementById("ssh-new-session-tab-btn"),
   groupFilters: document.getElementById("ssh-group-filters"),
   selectAllBtn: document.getElementById("ssh-select-all-btn"),
   clearSelectBtn: document.getElementById("ssh-clear-select-btn"),
   newHostBtn: document.getElementById("ssh-new-host-btn"),
+  keyWizardBtn: document.getElementById("ssh-key-wizard-btn"),
   hostSummary: document.getElementById("ssh-host-summary"),
   hostGroups: document.getElementById("ssh-host-groups"),
   hostId: document.getElementById("ssh-host-id"),
@@ -90,6 +99,11 @@ const nodes = {
   downloadHint: document.getElementById("ssh-download-hint"),
   transferStatus: document.getElementById("ssh-transfer-status"),
   remotePath: document.getElementById("ssh-remote-path"),
+  remoteTerminalConnectBtn: document.getElementById("ssh-remote-terminal-connect-btn"),
+  remoteTerminalDisconnectBtn: document.getElementById("ssh-remote-terminal-disconnect-btn"),
+  remoteTerminalClearBtn: document.getElementById("ssh-remote-terminal-clear-btn"),
+  remoteTerminalStatus: document.getElementById("ssh-remote-terminal-status"),
+  remoteTerminal: document.getElementById("ssh-remote-terminal"),
   remoteRefreshBtn: document.getElementById("ssh-remote-refresh-btn"),
   remoteUpBtn: document.getElementById("ssh-remote-up-btn"),
   remoteUseUploadBtn: document.getElementById("ssh-remote-use-upload-btn"),
@@ -111,6 +125,9 @@ const nodes = {
   remoteFilesStatus: document.getElementById("ssh-remote-files-status"),
   remoteFilesMeta: document.getElementById("ssh-remote-files-meta"),
   remoteFiles: document.getElementById("ssh-remote-files"),
+  remoteTree: document.getElementById("ssh-remote-tree"),
+  remoteList: document.getElementById("ssh-remote-list"),
+  remoteContextMenu: document.getElementById("ssh-remote-context-menu"),
   remoteEditorStatus: document.getElementById("ssh-remote-editor-status"),
   remoteEditorPath: document.getElementById("ssh-remote-editor-path"),
   remoteEditorText: document.getElementById("ssh-remote-editor-text"),
@@ -148,11 +165,25 @@ const nodes = {
   summaryCards: document.getElementById("ssh-summary-cards"),
   summaryRegion: document.getElementById("ssh-summary-region"),
   summaryEnv: document.getElementById("ssh-summary-env"),
-  results: document.getElementById("ssh-results")
+  results: document.getElementById("ssh-results"),
+  keyWizardModal: document.getElementById("ssh-key-wizard-modal"),
+  keyWizardHost: document.getElementById("ssh-key-wizard-host"),
+  keyWizardPassword: document.getElementById("ssh-key-wizard-password"),
+  keyWizardPasswordToggle: document.getElementById("ssh-key-wizard-password-toggle"),
+  keyWizardPrivateKey: document.getElementById("ssh-key-wizard-private-key"),
+  keyWizardPublicKey: document.getElementById("ssh-key-wizard-public-key"),
+  keyWizardKeepPassword: document.getElementById("ssh-key-wizard-keep-password"),
+  keyWizardCloseBtn: document.getElementById("ssh-key-wizard-close-btn"),
+  keyWizardCancelBtn: document.getElementById("ssh-key-wizard-cancel-btn"),
+  keyWizardApplyBtn: document.getElementById("ssh-key-wizard-apply-btn")
 };
+
+const SIMPLE_MODE = document.body.classList.contains("finalssh-lite");
+const ULTRA_MODE = document.body.classList.contains("finalssh-ultra");
 
 const state = {
   config: createEmptyConfig(),
+  sessionTabs: [],
   selectedIds: new Set(),
   activeHostId: "",
   activeFilter: "all",
@@ -171,6 +202,25 @@ const state = {
   pendingPrivateKeys: {},
   lastReplay: null,
   lastRetryCount: 0,
+  interactiveTerminal: {
+    term: null,
+    fitAddon: null,
+    resizeObserver: null,
+    resizeTimer: null,
+    sessionId: "",
+    hostId: "",
+    source: null,
+    inputBuffer: "",
+    flushTimer: null,
+    inputInFlight: false,
+    connected: false,
+    lastSeq: 0,
+    reconnectAttempts: 0,
+    reconnectTimer: null,
+    recoverAttempts: 0,
+    recoverTimer: null,
+    expectedClose: false
+  },
   remoteSelections: new Set(),
   remoteFiles: {
     hostId: "",
@@ -178,6 +228,17 @@ const state = {
     parent: "",
     entries: [],
     loading: false
+  },
+  remoteTree: {
+    rootPath: "",
+    expandedPaths: new Set(),
+    loadingPaths: new Set(),
+    children: new Map()
+  },
+  remoteUi: {
+    selectedPath: "",
+    contextMenuTargetPath: "",
+    pendingUploadDir: ""
   },
   remoteEditor: {
     hostId: "",
@@ -198,6 +259,7 @@ function init() {
   wireEvents();
   renderPresetGroups();
   renderAll();
+  setupInteractiveTerminal();
   void loadConfig();
 }
 
@@ -216,11 +278,21 @@ function createEmptyConfig() {
 function wireEvents() {
   nodes.reloadBtn.addEventListener("click", () => void loadConfig(true));
   nodes.saveBtn.addEventListener("click", () => void saveConfig());
+  if (nodes.newSessionTabBtn) {
+    nodes.newSessionTabBtn.addEventListener("click", () => openSessionTabPicker());
+  }
   nodes.newHostBtn.addEventListener("click", () => {
+    if (ULTRA_MODE) {
+      void quickAddHostInUltraMode();
+      return;
+    }
     startNewHost();
     renderHostEditor();
     renderTransferHints();
   });
+  if (nodes.keyWizardBtn) {
+    nodes.keyWizardBtn.addEventListener("click", () => openKeyWizard());
+  }
   nodes.testHostBtn.addEventListener("click", () => void testActiveHostConnection());
   nodes.checkHostKeyBtn.addEventListener("click", () => void checkHostPublicKey());
   nodes.distributeHostKeyBtn.addEventListener("click", () => void distributeHostPublicKey());
@@ -264,6 +336,32 @@ function wireEvents() {
   nodes.defaultCommandTimeout.addEventListener("change", applyDefaultsFromInputs);
   nodes.hostPasswordToggle.addEventListener("click", () => togglePasswordInput(nodes.hostPassword, nodes.hostPasswordToggle));
   nodes.hostSessionPasswordToggle.addEventListener("click", () => togglePasswordInput(nodes.hostSessionPassword, nodes.hostSessionPasswordToggle));
+  if (nodes.keyWizardPasswordToggle) {
+    nodes.keyWizardPasswordToggle.addEventListener("click", () => togglePasswordInput(nodes.keyWizardPassword, nodes.keyWizardPasswordToggle));
+  }
+  if (nodes.keyWizardCloseBtn) {
+    nodes.keyWizardCloseBtn.addEventListener("click", () => closeKeyWizard());
+  }
+  if (nodes.keyWizardCancelBtn) {
+    nodes.keyWizardCancelBtn.addEventListener("click", () => closeKeyWizard());
+  }
+  if (nodes.keyWizardApplyBtn) {
+    nodes.keyWizardApplyBtn.addEventListener("click", () => void applyKeyWizard());
+  }
+  if (nodes.keyWizardModal) {
+    nodes.keyWizardModal.addEventListener("click", (event) => {
+      if (event.target === nodes.keyWizardModal) closeKeyWizard();
+    });
+  }
+  window.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (nodes.remoteContextMenu && !nodes.remoteContextMenu.classList.contains("hidden")) {
+      hideRemoteContextMenu();
+      return;
+    }
+    if (!nodes.keyWizardModal || nodes.keyWizardModal.classList.contains("hidden")) return;
+    closeKeyWizard();
+  });
   nodes.hostSessionPassword.addEventListener("input", () => {
     const hostId = String(nodes.hostId.value || "").trim();
     if (!hostId) return;
@@ -276,6 +374,9 @@ function wireEvents() {
   nodes.runConnectTimeout.addEventListener("change", saveState);
   nodes.runCommandTimeout.addEventListener("change", saveState);
   nodes.commandInput.addEventListener("input", saveState);
+  if (nodes.remoteTerminalConnectBtn) nodes.remoteTerminalConnectBtn.addEventListener("click", () => void connectInteractiveTerminal());
+  if (nodes.remoteTerminalDisconnectBtn) nodes.remoteTerminalDisconnectBtn.addEventListener("click", () => void disconnectInteractiveTerminal(true));
+  if (nodes.remoteTerminalClearBtn) nodes.remoteTerminalClearBtn.addEventListener("click", () => clearInteractiveTerminalScreen());
   nodes.uploadRemotePath.addEventListener("input", saveState);
   nodes.downloadRemotePath.addEventListener("input", saveState);
   nodes.remotePath.addEventListener("change", () => void loadRemoteFiles(nodes.remotePath.value.trim() || "~"));
@@ -305,8 +406,9 @@ function wireEvents() {
     }
   });
   nodes.remoteSelectAllBtn.addEventListener("click", () => {
-    state.remoteFiles.entries.forEach((entry) => {
-      state.remoteSelections.add(joinRemotePath(state.remoteFiles.cwd || "~", entry.name));
+    const visibleEntries = getVisibleRemoteTreeEntries();
+    visibleEntries.forEach((item) => {
+      state.remoteSelections.add(item.path);
     });
     renderRemoteFiles();
   });
@@ -376,6 +478,31 @@ function wireEvents() {
     renderResults();
   });
   nodes.runBtn.addEventListener("click", () => void runCommand());
+  document.addEventListener("click", (event) => {
+    if (!nodes.remoteContextMenu || nodes.remoteContextMenu.classList.contains("hidden")) return;
+    if (nodes.remoteContextMenu.contains(event.target)) return;
+    hideRemoteContextMenu();
+  });
+  window.addEventListener("resize", () => hideRemoteContextMenu());
+  window.addEventListener("blur", () => hideRemoteContextMenu());
+  if (nodes.remoteList) {
+    nodes.remoteList.addEventListener("contextmenu", (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const row = target ? target.closest(".remote-list-row") : null;
+      if (row) return;
+      event.preventDefault();
+      showRemoteContextMenu(event, { scope: "blank", path: state.remoteFiles.cwd || "~" });
+    });
+  }
+  if (nodes.remoteTree) {
+    nodes.remoteTree.addEventListener("contextmenu", (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const node = target ? target.closest(".remote-tree-node") : null;
+      if (node) return;
+      event.preventDefault();
+      showRemoteContextMenu(event, { scope: "blank", path: state.remoteFiles.cwd || "~" });
+    });
+  }
 }
 
 async function loadConfig(isManual = false) {
@@ -418,8 +545,10 @@ async function saveConfig() {
     ensureActiveHost();
     renderAll();
     setStatus(`状态：已保存 ${state.config.hosts.length} 台主机`);
+    return true;
   } catch (error) {
     setStatus(`状态：保存 SSH 配置失败：${error.message}`);
+    return false;
   }
 }
 
@@ -493,6 +622,7 @@ function resolveHostGrouping(host) {
 
 function renderAll() {
   renderMeta();
+  renderSessionTabs();
   renderGroupFilters();
   renderHostGroups();
   renderHostEditor();
@@ -619,20 +749,38 @@ function renderHostCard(host) {
   }
   check.appendChild(checkbox);
   check.appendChild(main);
-  const editBtn = document.createElement("button");
-  editBtn.type = "button";
-  editBtn.className = "btn btn-ghost small";
-  editBtn.textContent = "编辑";
-  editBtn.addEventListener("click", () => {
-    state.activeHostId = host.id;
-    saveState();
-    renderHostGroups();
-    renderHostEditor();
-    renderTransferHints();
-    void loadRemoteFiles(state.remoteFiles.hostId === host.id ? state.remoteFiles.cwd || "~" : "~", { force: true });
+  const actions = document.createElement("div");
+  actions.className = "host-card-actions";
+  const openBtn = document.createElement("button");
+  openBtn.type = "button";
+  openBtn.className = "btn btn-ghost small";
+  openBtn.textContent = ULTRA_MODE ? "打开" : "编辑";
+  openBtn.addEventListener("click", () => {
+    openHostSession(host.id);
   });
+  actions.appendChild(openBtn);
+  if (ULTRA_MODE) {
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "btn btn-ghost small";
+    editBtn.textContent = "修改";
+    editBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void quickEditHostInUltraMode(host.id);
+    });
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "btn btn-danger small";
+    deleteBtn.textContent = "删除";
+    deleteBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void quickDeleteHostInUltraMode(host.id);
+    });
+    actions.appendChild(editBtn);
+    actions.appendChild(deleteBtn);
+  }
   top.appendChild(check);
-  top.appendChild(editBtn);
+  top.appendChild(actions);
   item.appendChild(top);
   if (host.tags.length) {
     const tags = document.createElement("div");
@@ -646,18 +794,14 @@ function renderHostCard(host) {
     item.appendChild(tags);
   }
   item.addEventListener("dblclick", () => {
-    state.activeHostId = host.id;
-    saveState();
-    renderHostGroups();
-    renderHostEditor();
-    renderTransferHints();
-    void loadRemoteFiles(state.remoteFiles.hostId === host.id ? state.remoteFiles.cwd || "~" : "~", { force: true });
+    openHostSession(host.id);
   });
   return item;
 }
 
 function renderHostEditor() {
   const host = getActiveHost();
+  if (nodes.keyWizardBtn) nodes.keyWizardBtn.disabled = !host;
   nodes.hostId.value = host?.id || "";
   nodes.hostName.value = host?.name || "";
   nodes.hostHost.value = host?.host || "";
@@ -681,6 +825,7 @@ function renderHostEditor() {
   nodes.checkHostKeyBtn.disabled = !host;
   nodes.distributeHostKeyBtn.disabled = !host;
   nodes.distributeSelectedHostKeyBtn.disabled = !state.selectedIds.size;
+  updateInteractiveTerminalUi();
 }
 
 function renderTransferHints() {
@@ -815,7 +960,8 @@ function renderSummary() {
 
 function renderRemoteFiles() {
   const activeHost = getActiveHost();
-  nodes.remoteFiles.innerHTML = "";
+  if (nodes.remoteTree) nodes.remoteTree.innerHTML = "";
+  if (nodes.remoteList) nodes.remoteList.innerHTML = "";
   if (!activeHost) {
     nodes.remoteFilesStatus.textContent = "请先选择当前编辑主机。";
     nodes.remoteFilesMeta.textContent = "没有活动主机，无法浏览远程目录。";
@@ -824,16 +970,20 @@ function renderRemoteFiles() {
     nodes.remoteSelectAllBtn.disabled = true;
     nodes.remoteClearSelectBtn.disabled = true;
     nodes.remoteDeleteSelectedBtn.disabled = true;
+    clearRemoteTreeState();
+    hideRemoteContextMenu();
     return;
   }
   nodes.remoteNewFolderBtn.disabled = false;
   nodes.remoteNewFileBtn.disabled = false;
+  const rootPath = getRemoteTreeRootPath();
+  const visibleEntries = getVisibleRemoteTreeEntries();
   nodes.remoteFilesStatus.textContent = state.remoteFiles.loading
     ? `正在读取 ${activeHost.name} 的目录...`
-    : "浏览当前编辑主机的远程目录，支持新建文件夹、重命名、删除和文本在线编辑。";
-  const visiblePaths = new Set(state.remoteFiles.entries.map((entry) => joinRemotePath(state.remoteFiles.cwd || "~", entry.name)));
+    : "左侧目录树，右侧文件列表。右键文件或目录可操作。";
+  const visiblePaths = new Set(visibleEntries.map((item) => item.path));
   state.remoteSelections = new Set(Array.from(state.remoteSelections).filter((remotePath) => visiblePaths.has(remotePath)));
-  nodes.remoteSelectAllBtn.disabled = !state.remoteFiles.entries.length || state.remoteFiles.loading;
+  nodes.remoteSelectAllBtn.disabled = !visibleEntries.length || state.remoteFiles.loading;
   nodes.remoteClearSelectBtn.disabled = !state.remoteSelections.size;
   nodes.remoteDownloadSelectedBtn.disabled = !state.remoteSelections.size || state.remoteFiles.loading;
   nodes.remoteArchiveSelectedBtn.disabled = !state.remoteSelections.size || state.remoteFiles.loading;
@@ -841,114 +991,500 @@ function renderRemoteFiles() {
   nodes.remoteMoveSelectedBtn.disabled = !state.remoteSelections.size || state.remoteFiles.loading;
   nodes.remoteCopySelectedBtn.disabled = !state.remoteSelections.size || state.remoteFiles.loading;
   nodes.remoteFilesMeta.textContent = state.remoteFiles.cwd
-    ? `当前主机：${activeHost.name}  当前目录：${state.remoteFiles.cwd}  已选 ${state.remoteSelections.size} 项`
+    ? `当前主机：${activeHost.name}  当前目录：${state.remoteFiles.cwd}  已选 ${state.remoteSelections.size} 项  可见 ${visibleEntries.length} 项`
     : `当前主机：${activeHost.name}`;
   nodes.remotePath.value = state.remoteFiles.cwd || nodes.remotePath.value || "~";
 
-  if (state.remoteFiles.loading) {
-    nodes.remoteFiles.innerHTML = `<div class="empty-state">目录加载中...</div>`;
+  if (!rootPath) {
+    if (nodes.remoteTree) nodes.remoteTree.innerHTML = `<div class="empty-state">暂无目录。</div>`;
+    if (nodes.remoteList) nodes.remoteList.innerHTML = `<div class="empty-state">暂无文件。</div>`;
     return;
   }
-  if (!state.remoteFiles.entries.length) {
-    nodes.remoteFiles.innerHTML = `<div class="empty-state">该目录为空，或者暂时没有可显示的文件。</div>`;
-    return;
+  if (!state.remoteTree.expandedPaths.has(rootPath)) {
+    state.remoteTree.expandedPaths.add(rootPath);
   }
+  renderRemoteTreeView(rootPath);
+  renderRemoteListView();
+}
 
-  state.remoteFiles.entries.forEach((entry) => {
-    const remotePath = joinRemotePath(state.remoteFiles.cwd || "~", entry.name);
-    const item = document.createElement("div");
-    item.className = "remote-file-item";
-    const main = document.createElement("div");
-    main.className = "remote-file-main";
-    const head = document.createElement("label");
-    head.className = "remote-file-head";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = state.remoteSelections.has(remotePath);
-    checkbox.addEventListener("change", () => {
-      if (checkbox.checked) state.remoteSelections.add(remotePath);
-      else state.remoteSelections.delete(remotePath);
-      renderRemoteFiles();
+function clearRemoteTreeState() {
+  state.remoteTree.rootPath = "";
+  state.remoteTree.children = new Map();
+  state.remoteTree.expandedPaths = new Set();
+  state.remoteTree.loadingPaths = new Set();
+  state.remoteUi.selectedPath = "";
+  state.remoteUi.contextMenuTargetPath = "";
+  state.remoteUi.pendingUploadDir = "";
+}
+
+function getRemoteTreeRootPath() {
+  return normalizeRemoteDirPath(state.remoteTree.rootPath || state.remoteFiles.cwd || "~");
+}
+
+function normalizeRemoteDirPath(value) {
+  return String(value || "~").trim() || "~";
+}
+
+function sortRemoteEntries(entriesInput) {
+  const entries = Array.isArray(entriesInput) ? entriesInput.slice() : [];
+  entries.sort((a, b) => {
+    const aDir = String(a?.kind || "") === "dir";
+    const bDir = String(b?.kind || "") === "dir";
+    if (aDir !== bDir) return aDir ? -1 : 1;
+    return String(a?.name || "").localeCompare(String(b?.name || ""), "zh-CN", {
+      sensitivity: "base",
+      numeric: true
     });
-    const name = document.createElement("div");
-    name.className = `remote-file-name ${entry.kind}`;
-    name.textContent = entry.kind === "dir" ? `${entry.name}/` : entry.name;
-    head.appendChild(checkbox);
-    head.appendChild(name);
-    const meta = document.createElement("div");
-    meta.className = "remote-file-meta";
-    meta.textContent = `${entry.kind}  ${formatBytes(entry.size || 0)}  ${formatEpoch(entry.mtimeSec)}`;
-    main.appendChild(head);
-    main.appendChild(meta);
-
-    const actions = document.createElement("div");
-    actions.className = "remote-file-actions";
-    if (entry.kind === "dir") {
-      const openBtn = document.createElement("button");
-      openBtn.type = "button";
-      openBtn.className = "btn btn-ghost small";
-      openBtn.textContent = "进入";
-      openBtn.addEventListener("click", () => {
-        void loadRemoteFiles(remotePath, { force: true });
-      });
-      const renameBtn = document.createElement("button");
-      renameBtn.type = "button";
-      renameBtn.className = "btn btn-ghost small";
-      renameBtn.textContent = "重命名";
-      renameBtn.addEventListener("click", () => void renameRemoteEntry(entry));
-      const deleteBtn = document.createElement("button");
-      deleteBtn.type = "button";
-      deleteBtn.className = "btn btn-danger small";
-      deleteBtn.textContent = "删除";
-      deleteBtn.addEventListener("click", () => void deleteRemoteEntry(entry));
-      actions.appendChild(openBtn);
-      actions.appendChild(renameBtn);
-      actions.appendChild(deleteBtn);
-    } else {
-      const previewBtn = document.createElement("button");
-      previewBtn.type = "button";
-      previewBtn.className = "btn btn-ghost small";
-      previewBtn.textContent = "预览编辑";
-      previewBtn.addEventListener("click", () => void openRemoteTextFile(remotePath));
-      const fillBtn = document.createElement("button");
-      fillBtn.type = "button";
-      fillBtn.className = "btn btn-ghost small";
-      fillBtn.textContent = "填入下载";
-      fillBtn.addEventListener("click", () => {
-        nodes.downloadRemotePath.value = remotePath;
-        saveState();
-        setStatus(`状态：已填入下载路径 ${nodes.downloadRemotePath.value}`);
-      });
-      const downloadBtn = document.createElement("button");
-      downloadBtn.type = "button";
-      downloadBtn.className = "btn btn-accent small";
-      downloadBtn.textContent = "下载";
-      downloadBtn.addEventListener("click", () => {
-        nodes.downloadRemotePath.value = remotePath;
-        saveState();
-        void downloadFileFromHost();
-      });
-      const renameBtn = document.createElement("button");
-      renameBtn.type = "button";
-      renameBtn.className = "btn btn-ghost small";
-      renameBtn.textContent = "重命名";
-      renameBtn.addEventListener("click", () => void renameRemoteEntry(entry));
-      const deleteBtn = document.createElement("button");
-      deleteBtn.type = "button";
-      deleteBtn.className = "btn btn-danger small";
-      deleteBtn.textContent = "删除";
-      deleteBtn.addEventListener("click", () => void deleteRemoteEntry(entry));
-      actions.appendChild(previewBtn);
-      actions.appendChild(fillBtn);
-      actions.appendChild(downloadBtn);
-      actions.appendChild(renameBtn);
-      actions.appendChild(deleteBtn);
-    }
-
-    item.appendChild(main);
-    item.appendChild(actions);
-    nodes.remoteFiles.appendChild(item);
   });
+  return entries;
+}
+
+function getVisibleRemoteTreeEntries() {
+  const cwd = normalizeRemoteDirPath(state.remoteFiles.cwd || "~");
+  const entries = Array.isArray(state.remoteFiles.entries) ? state.remoteFiles.entries : [];
+  return entries.map((entry) => ({
+    entry,
+    path: joinRemotePath(cwd, entry.name),
+    depth: 0,
+    parentDir: cwd
+  }));
+}
+
+function renderRemoteTreeView(rootPath) {
+  if (!nodes.remoteTree) return;
+  nodes.remoteTree.innerHTML = "";
+  const rootNode = renderRemoteTreeNode({
+    entry: { kind: "dir", name: rootPath },
+    path: rootPath,
+    parentDir: "",
+    depth: 0,
+    isRoot: true
+  });
+  nodes.remoteTree.appendChild(rootNode);
+  if (state.remoteTree.expandedPaths.has(rootPath)) {
+    renderRemoteTreeBranch(nodes.remoteTree, rootPath, 1);
+  }
+}
+
+function renderRemoteTreeNode({ entry, path, parentDir, depth, isRoot = false }) {
+  const expanded = state.remoteTree.expandedPaths.has(path);
+  const loading = state.remoteTree.loadingPaths.has(path);
+  const node = document.createElement("div");
+  node.className = `remote-tree-node${state.remoteFiles.cwd === path ? " active" : ""}${isRoot ? " root" : ""}`;
+  node.style.paddingLeft = `${Math.max(0, depth) * REMOTE_TREE_INDENT_PX + 6}px`;
+  node.dataset.path = path;
+
+  const toggleBtn = document.createElement("button");
+  toggleBtn.type = "button";
+  toggleBtn.className = "remote-tree-toggle";
+  toggleBtn.textContent = loading ? "…" : expanded ? "▾" : "▸";
+  toggleBtn.disabled = loading;
+  toggleBtn.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void toggleRemoteTreePath(path);
+  });
+  node.appendChild(toggleBtn);
+
+  const name = document.createElement("span");
+  name.className = "remote-tree-name";
+  name.textContent = isRoot ? path : String(entry.name || "");
+  node.appendChild(name);
+
+  node.addEventListener("click", () => {
+    state.remoteUi.selectedPath = path;
+    void loadRemoteFiles(path, { force: true, preserveTree: true });
+  });
+  node.addEventListener("dblclick", (event) => {
+    event.preventDefault();
+    void toggleRemoteTreePath(path);
+  });
+  node.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    showRemoteContextMenu(event, {
+      scope: "dir",
+      path,
+      parentDir,
+      entry: { ...entry, kind: "dir" },
+      root: isRoot
+    });
+  });
+  return node;
+}
+
+function renderRemoteTreeBranch(container, dirPath, depth) {
+  const entries = state.remoteTree.children.get(dirPath) || [];
+  const dirEntries = entries.filter((entry) => String(entry.kind || "") === "dir");
+  if (!dirEntries.length) return;
+  dirEntries.forEach((entry) => {
+    const remotePath = joinRemotePath(dirPath, entry.name);
+    container.appendChild(
+      renderRemoteTreeNode({
+        entry,
+        path: remotePath,
+        parentDir: dirPath,
+        depth
+      })
+    );
+    if (state.remoteTree.expandedPaths.has(remotePath)) {
+      if (state.remoteTree.loadingPaths.has(remotePath)) {
+        const loading = document.createElement("div");
+        loading.className = "remote-tree-loading";
+        loading.style.paddingLeft = `${Math.max(0, depth + 1) * REMOTE_TREE_INDENT_PX + 6}px`;
+        loading.textContent = "加载中...";
+        container.appendChild(loading);
+      } else {
+        renderRemoteTreeBranch(container, remotePath, depth + 1);
+      }
+    }
+  });
+}
+
+function renderRemoteListView() {
+  if (!nodes.remoteList) return;
+  nodes.remoteList.innerHTML = "";
+  if (state.remoteFiles.loading) {
+    nodes.remoteList.innerHTML = `<div class="empty-state">目录加载中...</div>`;
+    return;
+  }
+  const cwd = normalizeRemoteDirPath(state.remoteFiles.cwd || "~");
+  const entries = Array.isArray(state.remoteFiles.entries) ? state.remoteFiles.entries : [];
+  if (!entries.length) {
+    nodes.remoteList.innerHTML = `<div class="empty-state">当前目录为空。</div>`;
+    return;
+  }
+
+  const table = document.createElement("table");
+  table.className = "remote-list-table";
+  table.innerHTML = `
+    <thead>
+      <tr>
+        <th>文件名</th>
+        <th>大小</th>
+        <th>类型</th>
+        <th>修改时间</th>
+        <th>权限</th>
+        <th>用户/组</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  `;
+  const body = table.querySelector("tbody");
+  entries.forEach((entry) => {
+    const path = joinRemotePath(cwd, entry.name);
+    const row = document.createElement("tr");
+    row.className = `remote-list-row${state.remoteUi.selectedPath === path ? " active" : ""}`;
+    row.dataset.path = path;
+    row.innerHTML = `
+      <td class="name ${entry.kind || "file"}">${escapeHtml(String(entry.name || ""))}</td>
+      <td>${escapeHtml(String(entry.kind || "") === "file" ? formatBytes(entry.size) : "-")}</td>
+      <td>${escapeHtml(getRemoteEntryTypeLabel(entry.kind))}</td>
+      <td>${escapeHtml(formatEpoch(entry.mtimeSec))}</td>
+      <td>${escapeHtml(String(entry.permission || "-"))}</td>
+      <td>${escapeHtml(String(entry.ownerGroup || "-"))}</td>
+    `;
+    row.addEventListener("click", () => {
+      state.remoteUi.selectedPath = path;
+      renderRemoteListView();
+    });
+    row.addEventListener("dblclick", () => {
+      if (String(entry.kind || "") === "dir") {
+        void loadRemoteFiles(path, { force: true, preserveTree: true });
+      } else {
+        void openRemoteTextFile(path);
+      }
+    });
+    row.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      showRemoteContextMenu(event, {
+        scope: String(entry.kind || "") === "dir" ? "dir" : "file",
+        path,
+        parentDir: cwd,
+        entry
+      });
+    });
+    body.appendChild(row);
+  });
+  nodes.remoteList.appendChild(table);
+}
+
+function getRemoteEntryTypeLabel(kindInput) {
+  const kind = String(kindInput || "");
+  if (kind === "dir") return "目录";
+  if (kind === "symlink") return "链接";
+  return "文件";
+}
+
+function buildRemoteContextMenuItems(payload) {
+  if (!payload || !payload.scope) return [];
+  if (payload.scope === "file") {
+    return [
+      { id: "open-file", label: "打开文件" },
+      { id: "download-file", label: "下载文件" },
+      { id: "copy-path", label: "复制路径" },
+      { id: "rename", label: "重命名" },
+      { id: "delete", label: "删除", danger: true }
+    ];
+  }
+  if (payload.scope === "dir") {
+    const items = [
+      { id: "open-dir", label: "打开目录" },
+      { id: "refresh-dir", label: "刷新目录" },
+      { id: "copy-path", label: "复制路径" },
+      null,
+      { id: "upload-here", label: "上传到此目录" },
+      { id: "new-folder", label: "新建文件夹" },
+      { id: "new-file", label: "新建文件" },
+      null,
+      { id: "download-archive", label: "下载目录 ZIP" }
+    ];
+    if (!payload.root) {
+      items.push(null);
+      items.push({ id: "rename", label: "重命名" });
+      items.push({ id: "delete", label: "删除", danger: true });
+    }
+    return items;
+  }
+  return [
+    { id: "refresh", label: "刷新" },
+    { id: "upload-here", label: "上传到当前目录" },
+    { id: "new-folder", label: "新建文件夹" },
+    { id: "new-file", label: "新建文件" }
+  ];
+}
+
+function showRemoteContextMenu(event, payload) {
+  if (!nodes.remoteContextMenu) return;
+  const items = buildRemoteContextMenuItems(payload);
+  if (!items.length) return;
+  nodes.remoteContextMenu.innerHTML = "";
+  items.forEach((item) => {
+    if (!item) {
+      const divider = document.createElement("div");
+      divider.className = "remote-context-divider";
+      nodes.remoteContextMenu.appendChild(divider);
+      return;
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `remote-context-item${item.danger ? " danger" : ""}`;
+    button.textContent = item.label;
+    button.addEventListener("click", () => {
+      hideRemoteContextMenu();
+      void executeRemoteContextAction(item.id, payload);
+    });
+    nodes.remoteContextMenu.appendChild(button);
+  });
+  nodes.remoteContextMenu.classList.remove("hidden");
+  const menuRect = nodes.remoteContextMenu.getBoundingClientRect();
+  const maxLeft = window.innerWidth - menuRect.width - 8;
+  const maxTop = window.innerHeight - menuRect.height - 8;
+  const left = Math.max(8, Math.min(event.clientX, maxLeft));
+  const top = Math.max(8, Math.min(event.clientY, maxTop));
+  nodes.remoteContextMenu.style.left = `${left}px`;
+  nodes.remoteContextMenu.style.top = `${top}px`;
+  state.remoteUi.contextMenuTargetPath = String(payload?.path || "");
+}
+
+function hideRemoteContextMenu() {
+  if (!nodes.remoteContextMenu) return;
+  nodes.remoteContextMenu.classList.add("hidden");
+  nodes.remoteContextMenu.innerHTML = "";
+}
+
+async function executeRemoteContextAction(action, payload) {
+  const targetPath = normalizeRemoteDirPath(payload?.path || state.remoteFiles.cwd || "~");
+  const targetDir = String(payload?.scope || "") === "dir"
+    ? targetPath
+    : normalizeRemoteDirPath(payload?.parentDir || state.remoteFiles.cwd || "~");
+  const entry = payload?.entry || {
+    kind: payload?.scope === "dir" ? "dir" : "file",
+    name: targetPath.split("/").filter(Boolean).pop() || targetPath
+  };
+  const parentDir = normalizeRemoteDirPath(payload?.parentDir || targetDir || "~");
+  switch (action) {
+    case "open-file":
+      await openRemoteTextFile(targetPath);
+      break;
+    case "open-dir":
+      await loadRemoteFiles(targetPath, { force: true, preserveTree: true });
+      break;
+    case "refresh":
+    case "refresh-dir":
+      await loadRemoteFiles(targetDir, { force: true, preserveTree: true });
+      break;
+    case "copy-path":
+      await copyTextToClipboard(targetPath, `状态：已复制路径 ${targetPath}`);
+      break;
+    case "download-file":
+      await quickDownloadRemotePath(targetPath);
+      break;
+    case "download-archive":
+      await quickDownloadRemoteArchive([targetPath]);
+      break;
+    case "upload-here":
+      nodes.uploadRemotePath.value = ensureTrailingSlash(targetDir);
+      state.remoteUi.pendingUploadDir = targetDir;
+      saveState();
+      nodes.uploadFile.click();
+      setStatus(`状态：请选择要上传到 ${nodes.uploadRemotePath.value} 的本地文件`);
+      break;
+    case "new-folder":
+      await quickCreateRemoteFolder(targetDir);
+      break;
+    case "new-file":
+      await quickCreateRemoteTextFile(targetDir);
+      break;
+    case "rename":
+      await renameRemoteEntry(entry, parentDir);
+      break;
+    case "delete":
+      await deleteRemoteEntry(entry, parentDir);
+      break;
+    default:
+      break;
+  }
+}
+
+async function quickCreateRemoteFolder(targetDir) {
+  const folderName = window.prompt("请输入新文件夹名称");
+  if (folderName == null) return;
+  const trimmed = String(folderName || "").trim();
+  if (!trimmed) return setStatus("状态：新文件夹名称不能为空");
+  if (/[\\/]/.test(trimmed)) return setStatus("状态：新文件夹名称不能包含 / 或 \\");
+  const remotePath = joinRemotePath(targetDir, trimmed);
+  await runRemoteFileAction({
+    action: "mkdir",
+    path: remotePath,
+    busyText: `状态：正在创建远程文件夹 ${remotePath} ...`,
+    successText: `状态：已创建远程文件夹 ${remotePath}`,
+    afterSuccess: async () => {
+      await loadRemoteFiles(targetDir, { force: true, preserveTree: true });
+    }
+  });
+}
+
+async function quickCreateRemoteTextFile(targetDir) {
+  const fileName = window.prompt("请输入新文件名");
+  if (fileName == null) return;
+  const trimmed = String(fileName || "").trim();
+  if (!trimmed) return setStatus("状态：文件名不能为空");
+  if (/[\\/]/.test(trimmed)) return setStatus("状态：文件名称不能包含 / 或 \\");
+  const host = getActiveHost();
+  if (!host) return setStatus("状态：请先选择当前编辑主机");
+  const remotePath = joinRemotePath(targetDir, trimmed);
+  setStatus(`状态：正在创建空白文本文件 ${remotePath} ...`);
+  try {
+    const response = await fetch("/api/ssh/files/write-text", {
+      method: "POST",
+      headers: { ...buildAuthHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        hostId: host.id,
+        path: remotePath,
+        content: "",
+        sessionPasswords: buildSessionPasswords([host.id]),
+        connectTimeoutSec: clampInt(nodes.runConnectTimeout.value, state.config.defaults.connectTimeoutSec || 8, 1, 60),
+        timeoutMs: clampInt(nodes.runCommandTimeout.value, state.config.defaults.commandTimeoutMs || 20000, 1000, 600000)
+      })
+    });
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(payload.error || `创建失败（HTTP ${response.status}）`);
+    state.lastAction = "远程文本新建";
+    state.results = payload.result ? [payload.result] : [];
+    renderResults();
+    renderSummary();
+    await loadRemoteFiles(targetDir, { force: true, preserveTree: true });
+    setStatus(`状态：已创建空白文本文件 ${String(payload.path || remotePath)}`);
+  } catch (error) {
+    setStatus(`状态：创建空白文本文件失败：${error.message}`);
+  }
+}
+
+async function quickDownloadRemotePath(remotePath) {
+  nodes.downloadRemotePath.value = remotePath;
+  saveState();
+  await downloadFileFromHost();
+}
+
+async function quickDownloadRemoteArchive(remotePaths) {
+  if (state.transferRunning) return;
+  const host = getActiveHost();
+  if (!host) return setStatus("状态：请先选择当前编辑主机");
+  if (!Array.isArray(remotePaths) || !remotePaths.length) return;
+  state.transferRunning = true;
+  updateBusyButtons();
+  setStatus(`状态：正在打包 ${remotePaths.length} 项并下载 ZIP ...`);
+  try {
+    const response = await fetch("/api/ssh/download-archive", {
+      method: "POST",
+      headers: { ...buildAuthHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        hostId: host.id,
+        remotePaths,
+        name: `${host.name || host.host}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}`,
+        sessionPasswords: buildSessionPasswords([host.id]),
+        connectTimeoutSec: clampInt(nodes.runConnectTimeout.value, state.config.defaults.connectTimeoutSec || 8, 1, 60),
+        timeoutMs: clampInt(nodes.runCommandTimeout.value, state.config.defaults.commandTimeoutMs || 20000, 1000, 600000)
+      })
+    });
+    const contentType = String(response.headers.get("content-type") || "");
+    if (!response.ok || contentType.includes("application/json")) {
+      const payload = await parseJsonResponse(response);
+      throw new Error(payload.error || `ZIP 下载失败（HTTP ${response.status}）`);
+    }
+    const blob = await response.blob();
+    const fileName = parseDownloadFileName(response.headers.get("content-disposition")) || `${host.name || host.host}-batch.zip`;
+    triggerBlobDownload(blob, fileName);
+    setStatus(`状态：ZIP 下载完成：${fileName}`);
+  } catch (error) {
+    setStatus(`状态：ZIP 下载失败：${error.message}`);
+  } finally {
+    state.transferRunning = false;
+    updateBusyButtons();
+  }
+}
+
+async function toggleRemoteTreePath(remotePath) {
+  const target = normalizeRemoteDirPath(remotePath);
+  if (!target) return;
+  const rootPath = getRemoteTreeRootPath();
+  if (state.remoteTree.expandedPaths.has(target) && target !== rootPath) {
+    state.remoteTree.expandedPaths.delete(target);
+    renderRemoteFiles();
+    return;
+  }
+  state.remoteTree.expandedPaths.add(target);
+  if (state.remoteTree.children.has(target)) {
+    renderRemoteFiles();
+    return;
+  }
+  await loadRemoteTreeChildren(target);
+}
+
+async function loadRemoteTreeChildren(dirPath, options = {}) {
+  const activeHost = getActiveHost();
+  if (!activeHost) return;
+  const target = normalizeRemoteDirPath(dirPath);
+  if (!target || state.remoteTree.loadingPaths.has(target)) return;
+  if (!options.force && state.remoteTree.children.has(target)) return;
+  state.remoteTree.loadingPaths.add(target);
+  renderRemoteFiles();
+  try {
+    const payload = await fetchRemoteFileList(activeHost, target);
+    const normalizedCwd = normalizeRemoteDirPath(payload.cwd || target);
+    const sortedEntries = sortRemoteEntries(payload.entries);
+    state.remoteTree.children.set(target, sortedEntries);
+    state.remoteTree.expandedPaths.add(target);
+    if (normalizedCwd !== target) {
+      state.remoteTree.children.set(normalizedCwd, sortedEntries);
+      state.remoteTree.expandedPaths.add(normalizedCwd);
+    }
+  } catch (error) {
+    setStatus(`状态：读取目录失败：${error.message}`);
+  } finally {
+    state.remoteTree.loadingPaths.delete(target);
+    renderRemoteFiles();
+  }
 }
 
 function renderRemoteEditor() {
@@ -995,7 +1531,7 @@ function renderRemoteEditor() {
     return;
   }
   const suffix = dirty ? "，有未保存修改" : "，内容已同步";
-  nodes.remoteEditorStatus.textContent = `${editor.path}  ${formatBytes(editor.size || 0)}  ${formatEpoch(editor.mtimeSec)}${suffix}`;
+  nodes.remoteEditorStatus.textContent = `${editor.path}  ${formatBytes(editor.size || 0)}${suffix}`;
 }
 
 function buildSummary() {
@@ -1092,6 +1628,134 @@ function getActiveHost() {
   return state.config.hosts.find((item) => item.id === state.activeHostId) || null;
 }
 
+function getHostById(hostId) {
+  const id = String(hostId || "").trim();
+  if (!id) return null;
+  return state.config.hosts.find((item) => item.id === id) || null;
+}
+
+function ensureSessionTabsConsistency() {
+  const hostIds = new Set(state.config.hosts.map((item) => item.id));
+  const cleaned = [];
+  const seen = new Set();
+  (Array.isArray(state.sessionTabs) ? state.sessionTabs : []).forEach((item) => {
+    const id = String(item || "").trim();
+    if (!id || !hostIds.has(id) || seen.has(id)) return;
+    seen.add(id);
+    cleaned.push(id);
+  });
+  state.sessionTabs = cleaned;
+
+  if (state.activeHostId && hostIds.has(state.activeHostId) && !state.sessionTabs.includes(state.activeHostId)) {
+    state.sessionTabs.push(state.activeHostId);
+  }
+  if (!state.sessionTabs.length && state.config.hosts.length) {
+    state.sessionTabs.push(state.activeHostId || state.config.hosts[0].id);
+  }
+}
+
+function addSessionTab(hostId, options = {}) {
+  const id = String(hostId || "").trim();
+  if (!id || !getHostById(id)) return;
+  if (!state.sessionTabs.includes(id)) state.sessionTabs.push(id);
+  if (options.activate !== false) state.activeHostId = id;
+  ensureSessionTabsConsistency();
+}
+
+function openHostSession(hostId, options = {}) {
+  const host = getHostById(hostId);
+  if (!host) return;
+  addSessionTab(host.id, { activate: true });
+  saveState();
+  renderSessionTabs();
+  renderHostGroups();
+  renderHostEditor();
+  renderTransferHints();
+  void loadRemoteFiles(state.remoteFiles.hostId === host.id ? state.remoteFiles.cwd || "~" : "~", { force: true });
+  if (options.autoConnect !== false) {
+    void connectInteractiveTerminal();
+  }
+}
+
+function closeSessionTab(hostId) {
+  const id = String(hostId || "").trim();
+  if (!id) return;
+  const index = state.sessionTabs.indexOf(id);
+  if (index < 0) return;
+  const wasActive = state.activeHostId === id;
+  state.sessionTabs.splice(index, 1);
+  ensureSessionTabsConsistency();
+  if (wasActive) {
+    const fallback = state.sessionTabs[index] || state.sessionTabs[index - 1] || state.config.hosts[0]?.id || "";
+    if (fallback) {
+      openHostSession(fallback);
+      return;
+    }
+    state.activeHostId = "";
+  }
+  saveState();
+  renderSessionTabs();
+  renderHostGroups();
+}
+
+function renderSessionTabs() {
+  if (!nodes.sessionTabs) return;
+  ensureSessionTabsConsistency();
+  nodes.sessionTabs.innerHTML = "";
+  if (!state.sessionTabs.length) {
+    const empty = document.createElement("span");
+    empty.className = "section-tip";
+    empty.textContent = "暂无会话";
+    nodes.sessionTabs.appendChild(empty);
+    return;
+  }
+  state.sessionTabs.forEach((hostId) => {
+    const host = getHostById(hostId);
+    if (!host) return;
+    const item = document.createElement("div");
+    item.className = `ssh-tab-item${host.id === state.activeHostId ? " active" : ""}`;
+    const openBtn = document.createElement("button");
+    openBtn.type = "button";
+    openBtn.className = "ssh-tab-open";
+    openBtn.textContent = host.name || host.host;
+    openBtn.title = `${host.user}@${host.host}:${host.port}`;
+    openBtn.addEventListener("click", () => openHostSession(host.id));
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "ssh-tab-close";
+    closeBtn.setAttribute("aria-label", `关闭会话 ${host.name || host.host}`);
+    closeBtn.title = `关闭 ${host.name || host.host}`;
+    closeBtn.textContent = "×";
+    closeBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeSessionTab(host.id);
+    });
+    item.appendChild(openBtn);
+    item.appendChild(closeBtn);
+    nodes.sessionTabs.appendChild(item);
+  });
+}
+
+function openSessionTabPicker() {
+  if (!state.config.hosts.length) {
+    setStatus("状态：请先新建主机");
+    return;
+  }
+  const candidates = state.config.hosts.filter((host) => !state.sessionTabs.includes(host.id));
+  const list = (candidates.length ? candidates : state.config.hosts).slice(0, 20);
+  const tips = list
+    .map((host, index) => `${index + 1}. ${host.name} (${host.user}@${host.host}:${host.port})`)
+    .join("\n");
+  const answer = window.prompt(`选择要打开的会话主机（输入序号）:\n${tips}`, "1");
+  if (answer === null) return;
+  const index = Number.parseInt(String(answer || ""), 10);
+  if (!Number.isFinite(index) || index < 1 || index > list.length) {
+    setStatus("状态：序号无效");
+    return;
+  }
+  openHostSession(list[index - 1].id);
+}
+
 function ensureActiveHost() {
   if (state.config.hosts.some((item) => item.id === state.activeHostId)) return;
   state.activeHostId = state.config.hosts[0]?.id || "";
@@ -1107,6 +1771,7 @@ function syncSelectionWithHosts() {
   Object.keys(state.pendingPrivateKeys).forEach((id) => {
     if (!hostIds.has(id)) delete state.pendingPrivateKeys[id];
   });
+  state.sessionTabs = (Array.isArray(state.sessionTabs) ? state.sessionTabs : []).filter((id) => hostIds.has(id));
   saveState();
 }
 
@@ -1127,6 +1792,558 @@ function startNewHost() {
   nodes.hostNotes.value = "";
   nodes.hostEnabled.checked = true;
   saveState();
+}
+
+function promptRequiredField(label, defaultValue = "") {
+  let hint = defaultValue;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const raw = window.prompt(`${label}（必填）`, hint);
+    if (raw === null) return null;
+    const value = String(raw || "").trim();
+    if (value) return value;
+    window.alert(`${label}不能为空`);
+    hint = value;
+  }
+}
+
+function promptOptionalField(label, defaultValue = "") {
+  const raw = window.prompt(`${label}（可留空）`, defaultValue);
+  if (raw === null) return null;
+  return String(raw || "").trim();
+}
+
+function promptAuthMode(defaultValue = "1") {
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const raw = window.prompt("登录方式：1=仅私钥，2=仅密码，3=私钥优先失败后密码", defaultValue);
+    if (raw === null) return null;
+    const value = String(raw || "").trim();
+    if (value === "1" || value.toLowerCase() === "key") return "key";
+    if (value === "2" || value.toLowerCase() === "password") return "password";
+    if (value === "3" || value.toLowerCase() === "auto") return "auto";
+    window.alert("请输入 1、2、3（或 key/password/auto）");
+    defaultValue = value || "1";
+  }
+}
+
+function promptKeyInputMode(defaultValue = "2") {
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const raw = window.prompt("私钥输入方式：1=填写私钥文件路径，2=直接粘贴私钥明文", defaultValue);
+    if (raw === null) return null;
+    const value = String(raw || "").trim().toLowerCase();
+    if (value === "1" || value === "path") return "path";
+    if (value === "2" || value === "text") return "text";
+    window.alert("请输入 1 或 2（或 path/text）");
+    defaultValue = value || "2";
+  }
+}
+
+function promptAutoKeyInputMode(defaultValue = "2") {
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const raw = window.prompt("自动模式私钥选项：1=私钥路径，2=私钥明文，3=不填私钥（仅密码）", defaultValue);
+    if (raw === null) return null;
+    const value = String(raw || "").trim().toLowerCase();
+    if (value === "1" || value === "path") return "path";
+    if (value === "2" || value === "text") return "text";
+    if (value === "3" || value === "none") return "none";
+    window.alert("请输入 1、2、3（或 path/text/none）");
+    defaultValue = value || "2";
+  }
+}
+
+function normalizePrivateKeyTextInput(raw) {
+  let value = String(raw || "").replace(/\r\n/g, "\n").trim();
+  if (!value) return "";
+  if (!value.includes("\n") && value.includes("\\n")) {
+    value = value.replace(/\\n/g, "\n").trim();
+  }
+  return value;
+}
+
+function looksLikePublicKeyLine(value) {
+  return /^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521))\s+[A-Za-z0-9+/=]+(?:\s+.+)?$/i.test(String(value || "").trim());
+}
+
+function promptPrivateKeyText(required = false) {
+  let hint = "";
+  const title = required
+    ? "粘贴私钥明文（必填）"
+    : "粘贴私钥明文（可留空）";
+  const guide = "若粘贴后变成一行，可保留 \\n 转义。";
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const raw = window.prompt(`${title}\n${guide}`, hint);
+    if (raw === null) return null;
+    const value = normalizePrivateKeyTextInput(raw);
+    if (!value) {
+      if (required) {
+        window.alert("私钥内容不能为空");
+        hint = String(raw || "");
+        continue;
+      }
+      return "";
+    }
+    if (looksLikePublicKeyLine(value)) {
+      window.alert("你粘贴的是公钥（ssh-ed25519...），这里需要私钥明文");
+      hint = String(raw || "");
+      continue;
+    }
+    if (!/PRIVATE KEY/i.test(value)) {
+      window.alert("私钥格式看起来不正确，内容里应包含 PRIVATE KEY");
+      hint = String(raw || "");
+      continue;
+    }
+    return value;
+  }
+}
+
+function authModeToPromptDefault(mode) {
+  const value = String(mode || "").trim().toLowerCase();
+  if (value === "password") return "2";
+  if (value === "auto") return "3";
+  return "1";
+}
+
+function promptEditKeyOption(defaultValue = "1", allowClear = false) {
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const message = allowClear
+      ? "私钥设置：1=沿用当前，2=改私钥路径，3=粘贴新私钥明文，4=清空私钥"
+      : "私钥设置：1=沿用当前，2=改私钥路径，3=粘贴新私钥明文";
+    const raw = window.prompt(message, defaultValue);
+    if (raw === null) return null;
+    const value = String(raw || "").trim();
+    if (value === "1") return "keep";
+    if (value === "2") return "path";
+    if (value === "3") return "text";
+    if (allowClear && value === "4") return "clear";
+    window.alert(allowClear ? "请输入 1、2、3、4" : "请输入 1、2、3");
+    defaultValue = value || defaultValue;
+  }
+}
+
+function promptEditPasswordOption(defaultValue = "1") {
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const raw = window.prompt("密码设置：1=沿用当前，2=修改密码，3=清空已保存密码", defaultValue);
+    if (raw === null) return null;
+    const value = String(raw || "").trim();
+    if (value === "1") return "keep";
+    if (value === "2") return "set";
+    if (value === "3") return "clear";
+    window.alert("请输入 1、2、3");
+    defaultValue = value || defaultValue;
+  }
+}
+
+function promptEnabledFlag(defaultEnabled = true) {
+  const raw = window.prompt("是否启用这台主机：1=启用，0=禁用", defaultEnabled ? "1" : "0");
+  if (raw === null) return null;
+  const value = String(raw || "").trim();
+  if (value === "0") return false;
+  return true;
+}
+
+function isValidSshPublicKeyLine(value) {
+  return /^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521))\s+[A-Za-z0-9+/=]+(?:\s+.+)?$/i.test(String(value || "").trim());
+}
+
+function openKeyWizard() {
+  const host = getActiveHost();
+  if (!host) {
+    setStatus("状态：请先选择一台主机，再执行换钥匙");
+    return;
+  }
+  nodes.keyWizardHost.value = `${host.name} (${host.user}@${host.host}:${host.port})`;
+  nodes.keyWizardPassword.value = state.sessionPasswords[host.id] || "";
+  nodes.keyWizardPassword.type = "password";
+  nodes.keyWizardPasswordToggle.textContent = "显示";
+  nodes.keyWizardPrivateKey.value = "";
+  nodes.keyWizardPublicKey.value = nodes.hostPublicKeyText.value || "";
+  nodes.keyWizardKeepPassword.checked = false;
+  nodes.keyWizardModal.classList.remove("hidden");
+}
+
+function closeKeyWizard() {
+  if (!nodes.keyWizardModal) return;
+  nodes.keyWizardModal.classList.add("hidden");
+}
+
+async function derivePublicKeyFromPrivateKey(privateKeyText) {
+  const response = await fetch("/api/ssh/private-to-public", {
+    method: "POST",
+    headers: { ...buildAuthHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ privateKeyText })
+  });
+  const payload = await parseJsonResponse(response);
+  if (!response.ok) throw new Error(payload.error || `公钥生成失败（HTTP ${response.status}）`);
+  const publicKey = String(payload.publicKey || "").trim();
+  if (!isValidSshPublicKeyLine(publicKey)) {
+    throw new Error("生成的公钥格式不正确");
+  }
+  return publicKey;
+}
+
+async function distributePublicKeyToCurrentHost(hostId, publicKey, sessionPasswordValue) {
+  const sessionPasswords = buildSessionPasswords([hostId]);
+  const sessionPassword = String(sessionPasswordValue || "");
+  if (sessionPassword) sessionPasswords[hostId] = sessionPassword;
+  const response = await fetch("/api/ssh/distribute-key", {
+    method: "POST",
+    headers: { ...buildAuthHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      hostIds: [hostId],
+      publicKey,
+      sessionPasswords,
+      connectTimeoutSec: clampInt(nodes.runConnectTimeout.value, state.config.defaults.connectTimeoutSec || 8, 1, 60),
+      timeoutMs: clampInt(nodes.runCommandTimeout.value, state.config.defaults.commandTimeoutMs || 20000, 1000, 600000)
+    })
+  });
+  const payload = await parseJsonResponse(response);
+  if (!response.ok) throw new Error(payload.error || `公钥写入失败（HTTP ${response.status}）`);
+  const result = Array.isArray(payload.results) ? payload.results[0] : null;
+  if (!payload.ok || (result && !result.ok)) {
+    throw new Error(result?.stderr || `公钥写入失败（成功 ${payload.okCount || 0} 台，失败 ${payload.failCount || 0} 台）`);
+  }
+  return payload;
+}
+
+async function applyKeyWizard() {
+  const host = getActiveHost();
+  if (!host) {
+    setStatus("状态：请先选择一台主机");
+    closeKeyWizard();
+    return;
+  }
+  if (state.keyRunning) return;
+  const privateKeyText = normalizePrivateKeyTextInput(nodes.keyWizardPrivateKey.value);
+  if (!privateKeyText) return setStatus("状态：请先粘贴新私钥");
+  if (looksLikePublicKeyLine(privateKeyText)) return setStatus("状态：你粘贴的是公钥，请改为私钥内容");
+  if (!/PRIVATE KEY/i.test(privateKeyText)) return setStatus("状态：私钥格式看起来不正确，内容里应包含 PRIVATE KEY");
+  const sessionPassword = String(nodes.keyWizardPassword.value || "");
+  const keepPasswordFallback = !!nodes.keyWizardKeepPassword.checked;
+  let publicKey = String(nodes.keyWizardPublicKey.value || "").trim();
+
+  state.keyRunning = true;
+  updateBusyButtons();
+  try {
+    if (!publicKey) {
+      setStatus(`状态：正在为 ${host.name} 从私钥计算公钥...`);
+      publicKey = await derivePublicKeyFromPrivateKey(privateKeyText);
+      nodes.keyWizardPublicKey.value = publicKey;
+    } else if (!isValidSshPublicKeyLine(publicKey)) {
+      throw new Error("新公钥格式不正确，请填写 ssh-ed25519 / ssh-rsa 一整行");
+    }
+
+    setStatus(`状态：正在把新公钥写入 ${host.name}...`);
+    const payload = await distributePublicKeyToCurrentHost(host.id, publicKey, sessionPassword);
+    state.lastAction = "换钥匙";
+    state.lastRetryCount = 0;
+    state.results = Array.isArray(payload.results) ? payload.results : [];
+    renderResults();
+    renderSummary();
+
+    nodes.hostPrivateKeyText.value = privateKeyText;
+    nodes.hostPublicKeyText.value = publicKey;
+    nodes.hostAuthMode.value = keepPasswordFallback ? "auto" : "key";
+    if (sessionPassword) {
+      nodes.hostSessionPassword.value = sessionPassword;
+      state.sessionPasswords[host.id] = sessionPassword;
+    }
+    if (!keepPasswordFallback) {
+      nodes.hostPassword.value = "";
+    }
+    upsertHostFromForm();
+    const saved = await saveConfig();
+    if (!saved) throw new Error("私钥写入配置失败，请重试");
+
+    closeKeyWizard();
+    setStatus(`状态：${host.name} 已完成换钥匙，后续可直接私钥登录`);
+    await testActiveHostConnection();
+  } catch (error) {
+    setStatus(`状态：换钥匙失败：${error.message}`);
+  } finally {
+    state.keyRunning = false;
+    updateBusyButtons();
+  }
+}
+
+async function quickEditHostInUltraMode(hostId) {
+  const source = getHostById(hostId);
+  if (!source) return;
+  const name = promptRequiredField("主机名称", source.name);
+  if (name === null) return;
+  const host = promptRequiredField("主机地址（IP/域名）", source.host);
+  if (host === null) return;
+  const user = promptOptionalField("用户名", source.user || "root");
+  if (user === null) return;
+  const portRaw = promptOptionalField("端口", String(source.port || 22));
+  if (portRaw === null) return;
+  const authMode = promptAuthMode(authModeToPromptDefault(source.authMode));
+  if (authMode === null) return;
+
+  let identityFile = String(source.identityFile || "").trim();
+  let password = String(source.password || "");
+  let privateKeyText = String(state.pendingPrivateKeys[source.id] || "").trim();
+  let privateKeyUpdated = false;
+
+  if (authMode === "key") {
+    const keyOption = promptEditKeyOption("1", false);
+    if (keyOption === null) return;
+    if (keyOption === "path") {
+      const keyPath = promptRequiredField("私钥文件路径", identityFile || "~/.ssh/id_ed25519");
+      if (keyPath === null) return;
+      identityFile = keyPath;
+      privateKeyText = "";
+      privateKeyUpdated = true;
+    } else if (keyOption === "text") {
+      const rawPrivateKey = promptPrivateKeyText(true);
+      if (rawPrivateKey === null) return;
+      identityFile = "";
+      privateKeyText = rawPrivateKey;
+      privateKeyUpdated = true;
+    }
+    password = "";
+    if (!identityFile && !privateKeyText) {
+      setStatus("状态：仅私钥模式必须保留私钥路径或私钥明文");
+      return;
+    }
+  } else if (authMode === "password") {
+    identityFile = "";
+    privateKeyText = "";
+    privateKeyUpdated = true;
+    const passwordOption = promptEditPasswordOption(password ? "1" : "2");
+    if (passwordOption === null) return;
+    if (passwordOption === "set") {
+      const plainPassword = promptRequiredField("登录密码", "");
+      if (plainPassword === null) return;
+      password = plainPassword;
+    } else if (passwordOption === "clear") {
+      password = "";
+    }
+    if (!password) {
+      setStatus("状态：仅密码模式必须填写密码");
+      return;
+    }
+  } else {
+    const keyOption = promptEditKeyOption("1", true);
+    if (keyOption === null) return;
+    if (keyOption === "path") {
+      const keyPath = promptOptionalField("私钥文件路径", identityFile || "~/.ssh/id_ed25519");
+      if (keyPath === null) return;
+      identityFile = keyPath;
+      privateKeyText = "";
+      privateKeyUpdated = true;
+    } else if (keyOption === "text") {
+      const rawPrivateKey = promptPrivateKeyText(false);
+      if (rawPrivateKey === null) return;
+      identityFile = "";
+      privateKeyText = rawPrivateKey;
+      privateKeyUpdated = true;
+    } else if (keyOption === "clear") {
+      identityFile = "";
+      privateKeyText = "";
+      privateKeyUpdated = true;
+    }
+    const passwordOption = promptEditPasswordOption(password ? "1" : "2");
+    if (passwordOption === null) return;
+    if (passwordOption === "set") {
+      const plainPassword = promptOptionalField("登录密码（可留空）", password);
+      if (plainPassword === null) return;
+      password = plainPassword;
+    } else if (passwordOption === "clear") {
+      password = "";
+    }
+    if (!identityFile && !privateKeyText && !password) {
+      setStatus("状态：自动模式至少需要私钥路径、私钥明文或密码其中之一");
+      return;
+    }
+  }
+
+  const tags = promptOptionalField("标签（逗号分隔）", source.tags.join(", "));
+  if (tags === null) return;
+  const notes = promptOptionalField("备注", source.notes || "");
+  if (notes === null) return;
+  const enabled = promptEnabledFlag(source.enabled !== false);
+  if (enabled === null) return;
+
+  const entry = normalizeClientHost({
+    id: source.id,
+    name,
+    host,
+    user: user || "root",
+    port: clampInt(portRaw, source.port || 22, 1, 65535),
+    identityFile,
+    authMode,
+    password,
+    tags,
+    notes,
+    enabled
+  });
+  if (!entry) {
+    setStatus("状态：保存失败，请检查主机信息");
+    return;
+  }
+
+  const index = state.config.hosts.findIndex((item) => item.id === source.id);
+  if (index < 0) {
+    setStatus("状态：主机不存在，可能已被删除");
+    return;
+  }
+
+  state.config.hosts[index] = entry;
+  state.config.hosts.sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+  state.activeHostId = entry.id;
+  state.selectedIds.add(entry.id);
+  if (privateKeyUpdated) {
+    if (privateKeyText) state.pendingPrivateKeys[entry.id] = privateKeyText;
+    else delete state.pendingPrivateKeys[entry.id];
+  }
+  saveState();
+  renderAll();
+  try {
+    const saved = await saveConfig();
+    if (!saved) {
+      setStatus(`状态：已更新主机 ${entry.name}，但保存失败，请重试`);
+      return;
+    }
+    setStatus(`状态：已修改并保存主机 ${entry.name}`);
+    await loadRemoteFiles("~", { force: true });
+  } catch (error) {
+    setStatus(`状态：主机已修改，但自动保存失败：${error.message || "未知错误"}`);
+  }
+}
+
+async function quickDeleteHostInUltraMode(hostId) {
+  const host = getHostById(hostId);
+  if (!host) return;
+  const confirmed = window.confirm(`确认删除主机“${host.name}”（${host.user}@${host.host}:${host.port}）吗？`);
+  if (!confirmed) return;
+  if (state.interactiveTerminal.connected && state.interactiveTerminal.hostId === host.id) {
+    await disconnectInteractiveTerminal(true);
+  }
+  state.config.hosts = state.config.hosts.filter((item) => item.id !== host.id);
+  state.selectedIds.delete(host.id);
+  delete state.sessionPasswords[host.id];
+  delete state.pendingPrivateKeys[host.id];
+  state.sessionTabs = state.sessionTabs.filter((id) => id !== host.id);
+  if (state.activeHostId === host.id) state.activeHostId = state.config.hosts[0]?.id || "";
+  saveState();
+  renderAll();
+  try {
+    const saved = await saveConfig();
+    if (!saved) {
+      setStatus(`状态：已从列表移除 ${host.name}，但保存失败，请重试`);
+      return;
+    }
+    setStatus(`状态：已删除并保存主机 ${host.name}`);
+    await loadRemoteFiles("~", { force: true });
+  } catch (error) {
+    setStatus(`状态：主机已删除，但自动保存失败：${error.message || "未知错误"}`);
+  }
+}
+
+async function quickAddHostInUltraMode() {
+  const name = promptRequiredField("主机名称");
+  if (name === null) return;
+  const host = promptRequiredField("主机地址（IP/域名）");
+  if (host === null) return;
+  const user = promptOptionalField("用户名", "root");
+  if (user === null) return;
+  const portRaw = promptOptionalField("端口", "22");
+  if (portRaw === null) return;
+  const authMode = promptAuthMode("1");
+  if (authMode === null) return;
+  let identityFile = "";
+  let password = "";
+  let privateKeyText = "";
+  if (authMode === "key") {
+    const keyInputMode = promptKeyInputMode("2");
+    if (keyInputMode === null) return;
+    if (keyInputMode === "path") {
+      const keyPath = promptRequiredField("私钥文件路径", "~/.ssh/id_ed25519");
+      if (keyPath === null) return;
+      identityFile = keyPath;
+    } else {
+      const rawPrivateKey = promptPrivateKeyText(true);
+      if (rawPrivateKey === null) return;
+      privateKeyText = rawPrivateKey;
+    }
+  } else if (authMode === "password") {
+    const plainPassword = promptRequiredField("登录密码", "");
+    if (plainPassword === null) return;
+    password = plainPassword;
+  } else {
+    const autoKeyMode = promptAutoKeyInputMode("2");
+    if (autoKeyMode === null) return;
+    if (autoKeyMode === "path") {
+      const keyPath = promptOptionalField("私钥文件路径", "~/.ssh/id_ed25519");
+      if (keyPath === null) return;
+      identityFile = keyPath;
+    } else if (autoKeyMode === "text") {
+      const rawPrivateKey = promptPrivateKeyText(false);
+      if (rawPrivateKey === null) return;
+      privateKeyText = rawPrivateKey;
+    }
+    const plainPassword = promptOptionalField("登录密码", "");
+    if (plainPassword === null) return;
+    password = plainPassword;
+    if (!identityFile && !privateKeyText && !password) {
+      setStatus("状态：自动模式至少需要私钥路径、私钥明文或密码其中之一");
+      return;
+    }
+  }
+  if (authMode === "key" && !identityFile && !privateKeyText) {
+    setStatus("状态：仅私钥模式必须填写私钥路径或私钥明文");
+    return;
+  }
+  const tags = promptOptionalField("标签（逗号分隔）", "");
+  if (tags === null) return;
+  const notes = promptOptionalField("备注", "");
+  if (notes === null) return;
+
+  const entry = normalizeClientHost({
+    id: createTempId(),
+    name,
+    host,
+    user: user || "root",
+    port: clampInt(portRaw, 22, 1, 65535),
+    identityFile,
+    authMode,
+    password,
+    tags,
+    notes,
+    enabled: true
+  });
+  if (!entry) {
+    setStatus("状态：添加失败，请检查主机地址是否正确");
+    return;
+  }
+
+  state.config.hosts.push(entry);
+  state.config.hosts = dedupeHosts(state.config.hosts).sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+  state.activeHostId = entry.id;
+  state.selectedIds.add(entry.id);
+  if (privateKeyText) state.pendingPrivateKeys[entry.id] = privateKeyText;
+  else delete state.pendingPrivateKeys[entry.id];
+  state.activeFilter = "all";
+  if (nodes.search) nodes.search.value = "";
+  saveState();
+  renderAll();
+  try {
+    const saved = await saveConfig();
+    await loadRemoteFiles("~", { force: true });
+    if (!saved) {
+      setStatus(`状态：主机已加入列表，但保存失败，请检查后重试`);
+      return;
+    }
+    setStatus(`状态：已添加并保存主机 ${entry.name}${privateKeyText ? "（私钥已自动落盘）" : ""}`);
+  } catch (error) {
+    setStatus(`状态：主机已加入列表，但自动保存失败：${error.message || "未知错误"}`);
+  }
 }
 
 function upsertHostFromForm() {
@@ -1150,6 +2367,9 @@ function upsertHostFromForm() {
 function removeActiveHost() {
   if (!state.activeHostId) return setStatus("状态：当前没有可删除的主机");
   const target = getActiveHost();
+  if (target && state.interactiveTerminal.connected && state.interactiveTerminal.hostId === target.id) {
+    void disconnectInteractiveTerminal(true);
+  }
   state.config.hosts = state.config.hosts.filter((item) => item.id !== state.activeHostId);
   state.selectedIds.delete(state.activeHostId);
   delete state.sessionPasswords[state.activeHostId];
@@ -1557,11 +2777,22 @@ function applyDefaultsFromInputs() {
   saveState();
 }
 
+function resolveActionHostIds() {
+  const selected = Array.from(state.selectedIds);
+  if (selected.length) return selected;
+  const activeHost = getActiveHost();
+  if (!activeHost) return [];
+  state.selectedIds = new Set([activeHost.id]);
+  saveState();
+  renderHostGroups();
+  return [activeHost.id];
+}
+
 async function runCommand() {
   if (state.running) return;
-  const hostIds = Array.from(state.selectedIds);
+  const hostIds = resolveActionHostIds();
   const command = String(nodes.commandInput.value || "").trim();
-  if (!hostIds.length) return setStatus("状态：请先选择至少一台主机");
+  if (!hostIds.length) return setStatus("状态：请先选择一台主机（或先打开主机编辑）");
   if (!command) return setStatus("状态：请输入要执行的命令");
   state.lastAction = "命令执行";
   state.lastRetryCount = 0;
@@ -1592,12 +2823,443 @@ async function runCommand() {
   });
 }
 
+function setupInteractiveTerminal() {
+  if (!nodes.remoteTerminal || typeof window.Terminal !== "function") {
+    if (nodes.remoteTerminalStatus) nodes.remoteTerminalStatus.textContent = "当前环境缺少终端组件（xterm），无法启用交互终端。";
+    return;
+  }
+  if (state.interactiveTerminal.term) return;
+  const term = new window.Terminal({
+    cursorBlink: true,
+    fontSize: 13,
+    scrollback: 5000,
+    convertEol: true,
+    theme: {
+      background: "#0f172a",
+      foreground: "#dbeafe",
+      cursor: "#93c5fd",
+      selection: "rgba(59,130,246,0.28)"
+    }
+  });
+  const fitAddon = window.FitAddon && typeof window.FitAddon.FitAddon === "function"
+    ? new window.FitAddon.FitAddon()
+    : null;
+  if (fitAddon) {
+    try {
+      term.loadAddon(fitAddon);
+      state.interactiveTerminal.fitAddon = fitAddon;
+    } catch (_error) {
+      state.interactiveTerminal.fitAddon = null;
+    }
+  }
+  term.open(nodes.remoteTerminal);
+  term.writeln("OpenClaw SSH Interactive Terminal");
+  term.writeln("选择主机后，点击“连接终端”。\r\n");
+  term.onData((data) => queueInteractiveTerminalInput(data));
+  state.interactiveTerminal.term = term;
+  fitInteractiveTerminal();
+  window.requestAnimationFrame(() => {
+    fitInteractiveTerminal();
+    window.requestAnimationFrame(() => fitInteractiveTerminal());
+  });
+  if (!state.interactiveTerminal.resizeObserver && typeof window.ResizeObserver === "function") {
+    const observer = new window.ResizeObserver(() => {
+      if (state.interactiveTerminal.resizeTimer) {
+        window.clearTimeout(state.interactiveTerminal.resizeTimer);
+      }
+      state.interactiveTerminal.resizeTimer = window.setTimeout(() => {
+        state.interactiveTerminal.resizeTimer = null;
+        fitInteractiveTerminal();
+      }, 32);
+    });
+    observer.observe(nodes.remoteTerminal);
+    state.interactiveTerminal.resizeObserver = observer;
+  }
+  window.addEventListener("resize", fitInteractiveTerminal);
+  updateInteractiveTerminalUi();
+}
+
+function fitInteractiveTerminal() {
+  const fitAddon = state.interactiveTerminal.fitAddon;
+  const term = state.interactiveTerminal.term;
+  if (!fitAddon || !term) return;
+  try {
+    fitAddon.fit();
+  } catch (_error) {
+    // ignore fit failures caused by transitional layout state
+  }
+}
+
+function clearInteractiveTerminalScreen() {
+  const term = state.interactiveTerminal.term;
+  if (!term) return;
+  term.clear();
+}
+
+function writeInteractiveTerminal(text) {
+  const term = state.interactiveTerminal.term;
+  if (!term) return;
+  term.write(String(text || ""));
+}
+
+function setInteractiveTerminalStatus(text) {
+  if (!nodes.remoteTerminalStatus) return;
+  nodes.remoteTerminalStatus.textContent = String(text || "");
+}
+
+function buildInteractiveStreamUrl(sessionId, since = 0) {
+  const params = new URLSearchParams();
+  params.set("sessionId", String(sessionId || ""));
+  const sinceSeq = Number.parseInt(String(since || "0"), 10);
+  if (Number.isFinite(sinceSeq) && sinceSeq > 0) {
+    params.set("since", String(sinceSeq));
+  }
+  const token = String(nodes.token?.value || "").trim();
+  if (token) params.set("token", token);
+  return `/api/ssh/interactive/stream?${params.toString()}`;
+}
+
+function closeInteractiveEventSource() {
+  const source = state.interactiveTerminal.source;
+  if (state.interactiveTerminal.reconnectTimer) {
+    window.clearTimeout(state.interactiveTerminal.reconnectTimer);
+    state.interactiveTerminal.reconnectTimer = null;
+  }
+  if (!source) return;
+  try {
+    source.onerror = null;
+    source.onopen = null;
+    source.close();
+  } catch (_error) {
+    // ignore
+  }
+  state.interactiveTerminal.source = null;
+}
+
+function describeInteractiveCloseReason(payload = {}) {
+  const reason = String(payload.reason || "").trim();
+  if (reason === "manual_stop") return "手动断开";
+  if (reason === "idle_timeout") return "会话空闲超时";
+  if (reason === "cleanup_force") return "服务清理会话";
+  if (reason === "process_error") return "SSH 进程错误";
+  if (reason === "session_stop") return "会话停止";
+  if (reason === "process_exit") {
+    const exitCode = payload.exitCode == null ? null : Number(payload.exitCode);
+    if (exitCode === 0) return "远端会话已结束";
+    if (Number.isFinite(exitCode)) return `SSH 进程退出（exit=${exitCode}）`;
+    return "SSH 会话已结束";
+  }
+  if (payload.exitCode == null && payload.signal) return `SSH 会话被信号终止（${payload.signal}）`;
+  return "SSH 会话已关闭";
+}
+
+function clearInteractiveSessionRecoverTimer() {
+  if (state.interactiveTerminal.recoverTimer) {
+    window.clearTimeout(state.interactiveTerminal.recoverTimer);
+    state.interactiveTerminal.recoverTimer = null;
+  }
+}
+
+function cleanupInteractiveTerminalClosedState(options = {}) {
+  const keepHost = options.keepHost === true;
+  closeInteractiveEventSource();
+  state.interactiveTerminal.sessionId = "";
+  if (!keepHost) state.interactiveTerminal.hostId = "";
+  state.interactiveTerminal.connected = false;
+  state.interactiveTerminal.inputBuffer = "";
+  state.interactiveTerminal.inputInFlight = false;
+  state.interactiveTerminal.lastSeq = 0;
+  state.interactiveTerminal.reconnectAttempts = 0;
+  if (state.interactiveTerminal.flushTimer) {
+    window.clearTimeout(state.interactiveTerminal.flushTimer);
+    state.interactiveTerminal.flushTimer = null;
+  }
+}
+
+function shouldAutoRecoverInteractiveSession(payload = {}) {
+  if (state.interactiveTerminal.expectedClose) return false;
+  const reason = String(payload.reason || "").trim();
+  if (reason === "manual_stop") return false;
+  return true;
+}
+
+function scheduleInteractiveSessionRecover(hostId, reasonText) {
+  const targetHostId = String(hostId || "").trim();
+  if (!targetHostId) return;
+  if (state.interactiveTerminal.recoverTimer) return;
+  const attempts = Number(state.interactiveTerminal.recoverAttempts || 0);
+  if (attempts >= INTERACTIVE_SESSION_RECOVER_MAX) {
+    setInteractiveTerminalStatus(`会话已断开：${reasonText}。自动恢复失败，请手动重连。`);
+    state.interactiveTerminal.recoverAttempts = 0;
+    updateInteractiveTerminalUi();
+    return;
+  }
+  state.interactiveTerminal.recoverAttempts = attempts + 1;
+  const delayMs = Math.min(
+    12000,
+    INTERACTIVE_SESSION_RECOVER_BASE_MS * Math.pow(1.5, attempts)
+  );
+  setInteractiveTerminalStatus(
+    `会话断开：${reasonText}。${Math.round(delayMs / 1000)} 秒后自动恢复（${state.interactiveTerminal.recoverAttempts}/${INTERACTIVE_SESSION_RECOVER_MAX}）...`
+  );
+  state.interactiveTerminal.recoverTimer = window.setTimeout(async () => {
+    state.interactiveTerminal.recoverTimer = null;
+    const host = getHostById(targetHostId);
+    if (!host) {
+      setInteractiveTerminalStatus("自动恢复失败：主机已不存在。");
+      return;
+    }
+    if (state.activeHostId !== targetHostId) {
+      setInteractiveTerminalStatus("自动恢复已取消：你已切换到其他主机。");
+      state.interactiveTerminal.recoverAttempts = 0;
+      return;
+    }
+    await connectInteractiveTerminal({ hostId: targetHostId, fromRecovery: true });
+    if (state.interactiveTerminal.connected && state.interactiveTerminal.hostId === targetHostId) {
+      state.interactiveTerminal.recoverAttempts = 0;
+      setInteractiveTerminalStatus(`已自动恢复：${host.name}（${host.user}@${host.host}）`);
+      setStatus(`状态：已自动恢复终端连接 ${host.name}`);
+    } else {
+      scheduleInteractiveSessionRecover(targetHostId, reasonText);
+    }
+  }, delayMs);
+}
+
+function startInteractiveEventSource(sessionId, options = {}) {
+  const sid = String(sessionId || "").trim();
+  if (!sid) return;
+  const since = Number.parseInt(String(options.since || "0"), 10);
+  closeInteractiveEventSource();
+  const source = new EventSource(buildInteractiveStreamUrl(sid, Number.isFinite(since) ? since : 0));
+  state.interactiveTerminal.source = source;
+
+  source.onopen = () => {
+    state.interactiveTerminal.reconnectAttempts = 0;
+    if (!options.reconnect) return;
+    const host = getActiveHost();
+    if (host && state.interactiveTerminal.connected && state.interactiveTerminal.hostId === host.id) {
+      setInteractiveTerminalStatus(`已恢复连接：${host.name}（${host.user}@${host.host}）`);
+    }
+  };
+
+  source.addEventListener("chunk", (event) => {
+    try {
+      const data = JSON.parse(String(event.data || "{}"));
+      const seq = Number.parseInt(String(data.seq || "0"), 10);
+      if (Number.isFinite(seq) && seq > 0) {
+        state.interactiveTerminal.lastSeq = Math.max(state.interactiveTerminal.lastSeq, seq);
+      }
+      writeInteractiveTerminal(String(data.data || ""));
+    } catch (_error) {
+      // ignore parse error
+    }
+  });
+
+  source.addEventListener("close", (event) => {
+    let payload = {};
+    try {
+      payload = JSON.parse(String(event.data || "{}")) || {};
+    } catch (_error) {
+      payload = {};
+    }
+    const exitText = payload.exitCode == null ? "-" : String(payload.exitCode);
+    const reasonText = describeInteractiveCloseReason(payload);
+    writeInteractiveTerminal(`\r\n[session close] exit=${exitText}${payload.signal ? ` signal=${payload.signal}` : ""} reason=${reasonText}\r\n`);
+    const closedHostId = String(state.interactiveTerminal.hostId || "");
+    if (!shouldAutoRecoverInteractiveSession(payload)) {
+      cleanupInteractiveTerminalClosedState({ keepHost: false });
+      state.interactiveTerminal.expectedClose = false;
+      setInteractiveTerminalStatus(`终端已断开：${reasonText}`);
+      updateInteractiveTerminalUi();
+      return;
+    }
+    cleanupInteractiveTerminalClosedState({ keepHost: true });
+    scheduleInteractiveSessionRecover(closedHostId, reasonText);
+    updateInteractiveTerminalUi();
+  });
+
+  source.onerror = () => {
+    if (!state.interactiveTerminal.connected || state.interactiveTerminal.sessionId !== sid) return;
+    writeInteractiveTerminal("\r\n[stream disconnected]\r\n");
+    scheduleInteractiveStreamReconnect();
+  };
+}
+
+function scheduleInteractiveStreamReconnect() {
+  if (!state.interactiveTerminal.connected || !state.interactiveTerminal.sessionId) return;
+  if (state.interactiveTerminal.reconnectTimer) return;
+  const attempts = Number(state.interactiveTerminal.reconnectAttempts || 0);
+  if (attempts >= INTERACTIVE_STREAM_RECONNECT_MAX) {
+    setInteractiveTerminalStatus("连接中断：流重连失败，正在尝试重建会话...");
+    const hostId = String(state.interactiveTerminal.hostId || "");
+    cleanupInteractiveTerminalClosedState({ keepHost: true });
+    scheduleInteractiveSessionRecover(hostId, "网络流中断");
+    return;
+  }
+  state.interactiveTerminal.reconnectAttempts = attempts + 1;
+  const delayMs = Math.min(
+    10000,
+    INTERACTIVE_STREAM_RECONNECT_BASE_MS * Math.pow(1.5, attempts)
+  );
+  setInteractiveTerminalStatus(
+    `连接中断，${Math.round(delayMs / 1000)} 秒后自动重连（${state.interactiveTerminal.reconnectAttempts}/${INTERACTIVE_STREAM_RECONNECT_MAX}）...`
+  );
+  state.interactiveTerminal.reconnectTimer = window.setTimeout(() => {
+    state.interactiveTerminal.reconnectTimer = null;
+    if (!state.interactiveTerminal.connected || !state.interactiveTerminal.sessionId) return;
+    startInteractiveEventSource(state.interactiveTerminal.sessionId, {
+      since: state.interactiveTerminal.lastSeq,
+      reconnect: true
+    });
+  }, delayMs);
+}
+
+function updateInteractiveTerminalUi() {
+  const hasHost = !!getActiveHost();
+  const connected = !!state.interactiveTerminal.connected;
+  if (nodes.remoteTerminalConnectBtn) nodes.remoteTerminalConnectBtn.disabled = state.running || state.transferRunning || state.keyRunning || connected || !hasHost;
+  if (nodes.remoteTerminalDisconnectBtn) nodes.remoteTerminalDisconnectBtn.disabled = !connected;
+  if (nodes.remoteTerminalClearBtn) nodes.remoteTerminalClearBtn.disabled = !state.interactiveTerminal.term;
+}
+
+function queueInteractiveTerminalInput(data) {
+  if (!state.interactiveTerminal.connected || !state.interactiveTerminal.sessionId) return;
+  state.interactiveTerminal.inputBuffer += String(data || "");
+  if (state.interactiveTerminal.flushTimer) return;
+  state.interactiveTerminal.flushTimer = window.setTimeout(() => {
+    state.interactiveTerminal.flushTimer = null;
+    void flushInteractiveTerminalInput();
+  }, 30);
+}
+
+async function flushInteractiveTerminalInput() {
+  if (state.interactiveTerminal.inputInFlight) return;
+  const sessionId = String(state.interactiveTerminal.sessionId || "").trim();
+  const payloadData = state.interactiveTerminal.inputBuffer;
+  if (!sessionId || !payloadData) return;
+  state.interactiveTerminal.inputBuffer = "";
+  state.interactiveTerminal.inputInFlight = true;
+  try {
+    const response = await fetch("/api/ssh/interactive/input", {
+      method: "POST",
+      headers: { ...buildAuthHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId,
+        data: payloadData
+      })
+    });
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(payload.error || `输入失败（HTTP ${response.status}）`);
+  } catch (error) {
+    writeInteractiveTerminal(`\r\n[input error] ${error.message || "未知错误"}\r\n`);
+    setStatus(`状态：交互终端输入失败：${error.message}`);
+  } finally {
+    state.interactiveTerminal.inputInFlight = false;
+    if (state.interactiveTerminal.inputBuffer) {
+      void flushInteractiveTerminalInput();
+    }
+  }
+}
+
+async function connectInteractiveTerminal(options = {}) {
+  setupInteractiveTerminal();
+  const preferredHostId = String(options.hostId || "").trim();
+  const host = preferredHostId ? getHostById(preferredHostId) : getActiveHost();
+  if (!host) return setStatus("状态：请先选择当前主机");
+  if (preferredHostId && state.activeHostId !== preferredHostId) {
+    state.activeHostId = preferredHostId;
+    saveState();
+    renderSessionTabs();
+    renderHostGroups();
+    renderHostEditor();
+    renderTransferHints();
+  }
+  clearInteractiveSessionRecoverTimer();
+  if (state.interactiveTerminal.connected) {
+    if (state.interactiveTerminal.hostId === host.id) {
+      setInteractiveTerminalStatus(`已连接：${host.name}（${host.user}@${host.host}）`);
+      setStatus(`状态：当前已连接 ${host.name}`);
+      updateInteractiveTerminalUi();
+      return;
+    }
+    await disconnectInteractiveTerminal(true);
+  }
+  try {
+    setInteractiveTerminalStatus(`正在连接 ${host.name} ...`);
+    const response = await fetch("/api/ssh/interactive/start", {
+      method: "POST",
+      headers: { ...buildAuthHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        hostId: host.id,
+        connectTimeoutSec: clampInt(nodes.runConnectTimeout.value, state.config.defaults.connectTimeoutSec || 8, 1, 60),
+        sessionPassword: String(state.sessionPasswords[host.id] || "")
+      })
+    });
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(payload.error || `连接失败（HTTP ${response.status}）`);
+
+    const sessionId = String(payload.sessionId || "").trim();
+    if (!sessionId) throw new Error("服务端未返回 sessionId");
+    state.interactiveTerminal.sessionId = sessionId;
+    state.interactiveTerminal.hostId = host.id;
+    state.interactiveTerminal.connected = true;
+    state.interactiveTerminal.inputBuffer = "";
+    state.interactiveTerminal.inputInFlight = false;
+    state.interactiveTerminal.lastSeq = 0;
+    state.interactiveTerminal.reconnectAttempts = 0;
+    state.interactiveTerminal.recoverAttempts = 0;
+    state.interactiveTerminal.expectedClose = false;
+    startInteractiveEventSource(sessionId);
+    fitInteractiveTerminal();
+    const term = state.interactiveTerminal.term;
+    if (term && typeof term.focus === "function") term.focus();
+    const connectedName = payload.host?.name || host.name;
+    const connectedUser = payload.host?.user || host.user;
+    const connectedHost = payload.host?.host || host.host;
+    setInteractiveTerminalStatus(`已连接：${connectedName}（${connectedUser}@${connectedHost}）`);
+    if (options.fromRecovery) {
+      setStatus(`状态：终端已自动恢复到 ${connectedName}`);
+    } else {
+      setStatus(`状态：已连接交互终端 ${connectedName}`);
+    }
+  } catch (error) {
+    cleanupInteractiveTerminalClosedState({ keepHost: false });
+    state.interactiveTerminal.expectedClose = false;
+    setInteractiveTerminalStatus(`连接失败：${error.message || "未知错误"}`);
+    setStatus(`状态：交互终端连接失败：${error.message}`);
+  } finally {
+    updateInteractiveTerminalUi();
+  }
+}
+
+async function disconnectInteractiveTerminal(sendStop = true) {
+  const sessionId = String(state.interactiveTerminal.sessionId || "").trim();
+  state.interactiveTerminal.expectedClose = !!sendStop;
+  clearInteractiveSessionRecoverTimer();
+  if (sendStop && sessionId) {
+    try {
+      await fetch("/api/ssh/interactive/stop", {
+        method: "POST",
+        headers: { ...buildAuthHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId })
+      });
+    } catch (_error) {
+      // ignore disconnect failure
+    }
+  }
+  cleanupInteractiveTerminalClosedState({ keepHost: false });
+  state.interactiveTerminal.recoverAttempts = 0;
+  state.interactiveTerminal.expectedClose = false;
+  setInteractiveTerminalStatus("终端未连接。请选择主机后点击“连接终端”。");
+  updateInteractiveTerminalUi();
+}
+
 async function uploadFileToHosts() {
   if (state.transferRunning) return;
   if (!state.scpAvailable) return setStatus("状态：scp 不可用，无法上传");
   if (!state.uploadFile) return setStatus("状态：请先选择上传文件");
-  const hostIds = Array.from(state.selectedIds);
-  if (!hostIds.length) return setStatus("状态：请先选择至少一台主机");
+  const hostIds = resolveActionHostIds();
+  if (!hostIds.length) return setStatus("状态：请先选择一台主机（或先打开主机编辑）");
   const remotePath = String(nodes.uploadRemotePath.value || "").trim() || ensureTrailingSlash(state.remoteFiles.cwd || "~");
   if (!remotePath) return setStatus("状态：请填写远程目标路径");
   const buffer = await state.uploadFile.arrayBuffer();
@@ -1672,6 +3334,7 @@ async function loadRemoteFiles(targetPath, options = {}) {
       entries: [],
       loading: false
     };
+    clearRemoteTreeState();
     resetRemoteEditor();
     renderRemoteFiles();
     renderRemoteEditor();
@@ -1680,7 +3343,10 @@ async function loadRemoteFiles(targetPath, options = {}) {
 
   const requestedPath = String(targetPath || "~").trim() || "~";
   const hostChanged = state.remoteFiles.hostId !== activeHost.id;
-  if (hostChanged) resetRemoteEditor();
+  if (hostChanged) {
+    resetRemoteEditor();
+    clearRemoteTreeState();
+  }
   if (!options.force && !hostChanged && state.remoteFiles.cwd === requestedPath && state.remoteFiles.entries.length) {
     renderRemoteFiles();
     return;
@@ -1690,27 +3356,31 @@ async function loadRemoteFiles(targetPath, options = {}) {
   state.remoteFiles.hostId = activeHost.id;
   renderRemoteFiles();
   try {
-    const response = await fetch("/api/ssh/files/list", {
-      method: "POST",
-      headers: { ...buildAuthHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({
-        hostId: activeHost.id,
-        path: requestedPath,
-        sessionPasswords: buildSessionPasswords([activeHost.id]),
-        showHidden: true,
-        connectTimeoutSec: clampInt(nodes.runConnectTimeout.value, state.config.defaults.connectTimeoutSec || 8, 1, 60),
-        timeoutMs: clampInt(nodes.runCommandTimeout.value, state.config.defaults.commandTimeoutMs || 20000, 1000, 600000)
-      })
-    });
-    const payload = await parseJsonResponse(response);
-    if (!response.ok) throw new Error(payload.error || `目录读取失败（HTTP ${response.status}）`);
+    const payload = await fetchRemoteFileList(activeHost, requestedPath);
+    const nextCwd = normalizeRemoteDirPath(payload.cwd || requestedPath || "~");
+    const nextEntries = sortRemoteEntries(payload.entries);
+    const preserveTree = !hostChanged && !!options.preserveTree && !!state.remoteTree.rootPath;
+    const nextRootPath = preserveTree
+      ? normalizeRemoteDirPath(state.remoteTree.rootPath || nextCwd)
+      : nextCwd;
+    const nextChildren = preserveTree ? new Map(state.remoteTree.children) : new Map();
+    nextChildren.set(nextCwd, nextEntries);
+    if (!nextChildren.has(nextRootPath)) nextChildren.set(nextRootPath, nextEntries);
+    const nextExpanded = preserveTree ? new Set(state.remoteTree.expandedPaths) : new Set();
+    nextExpanded.add(nextRootPath);
+    nextExpanded.add(nextCwd);
+
     state.remoteFiles = {
       hostId: activeHost.id,
-      cwd: String(payload.cwd || requestedPath || "~"),
+      cwd: nextCwd,
       parent: String(payload.parent || "").trim(),
-      entries: Array.isArray(payload.entries) ? payload.entries : [],
+      entries: nextEntries,
       loading: false
     };
+    state.remoteTree.rootPath = nextRootPath;
+    state.remoteTree.expandedPaths = nextExpanded;
+    state.remoteTree.loadingPaths = new Set();
+    state.remoteTree.children = nextChildren;
     nodes.remotePath.value = state.remoteFiles.cwd;
     if (!String(nodes.uploadRemotePath.value || "").trim()) {
       nodes.uploadRemotePath.value = ensureTrailingSlash(state.remoteFiles.cwd);
@@ -1723,6 +3393,28 @@ async function loadRemoteFiles(targetPath, options = {}) {
     renderRemoteFiles();
     setStatus(`状态：远程目录读取失败：${error.message}`);
   }
+}
+
+async function fetchRemoteFileList(activeHost, requestedPath) {
+  const response = await fetch("/api/ssh/files/list", {
+    method: "POST",
+    headers: { ...buildAuthHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      hostId: activeHost.id,
+      path: requestedPath,
+      sessionPasswords: buildSessionPasswords([activeHost.id]),
+      showHidden: true,
+      connectTimeoutSec: clampInt(nodes.runConnectTimeout.value, state.config.defaults.connectTimeoutSec || 8, 1, 60),
+      timeoutMs: clampInt(nodes.runCommandTimeout.value, state.config.defaults.commandTimeoutMs || 20000, 1000, 600000)
+    })
+  });
+  const payload = await parseJsonResponse(response);
+  if (!response.ok) throw new Error(payload.error || `目录读取失败（HTTP ${response.status}）`);
+  return {
+    cwd: String(payload.cwd || requestedPath || "~"),
+    parent: String(payload.parent || "").trim(),
+    entries: Array.isArray(payload.entries) ? payload.entries : []
+  };
 }
 
 async function createRemoteFolder() {
@@ -1780,15 +3472,15 @@ async function createRemoteTextFile() {
   }
 }
 
-async function renameRemoteEntry(entry) {
-  const currentPath = joinRemotePath(state.remoteFiles.cwd || "~", entry.name);
+async function renameRemoteEntry(entry, parentDirPath = state.remoteFiles.cwd || "~") {
+  const currentPath = joinRemotePath(parentDirPath, entry.name);
   const nextName = window.prompt("请输入新的名称", entry.name);
   if (nextName == null) return;
   const trimmed = String(nextName || "").trim();
   if (!trimmed) return setStatus("状态：重命名已取消，名称不能为空");
   if (trimmed === entry.name) return;
   if (/[\\/]/.test(trimmed)) return setStatus("状态：新名称不能包含 / 或 \\");
-  const nextPath = joinRemotePath(state.remoteFiles.cwd || "~", trimmed);
+  const nextPath = joinRemotePath(parentDirPath, trimmed);
   await runRemoteFileAction({
     action: "rename",
     path: currentPath,
@@ -1799,14 +3491,14 @@ async function renameRemoteEntry(entry) {
       if (state.remoteEditor.path === currentPath) {
         state.remoteEditor.path = nextPath;
       }
-      await loadRemoteFiles(state.remoteFiles.cwd || "~", { force: true });
+      await loadRemoteFiles(getRemoteTreeRootPath() || state.remoteFiles.cwd || "~", { force: true });
       renderRemoteEditor();
     }
   });
 }
 
-async function deleteRemoteEntry(entry) {
-  const targetPath = joinRemotePath(state.remoteFiles.cwd || "~", entry.name);
+async function deleteRemoteEntry(entry, parentDirPath = state.remoteFiles.cwd || "~") {
+  const targetPath = joinRemotePath(parentDirPath, entry.name);
   const tip = entry.kind === "dir" ? "该目录及其内容会一起删除" : "该文件会被删除";
   if (!window.confirm(`确认删除 ${targetPath} 吗？\n${tip}`)) return;
   await runRemoteFileAction({
@@ -1816,7 +3508,7 @@ async function deleteRemoteEntry(entry) {
     successText: `状态：已删除 ${targetPath}`,
     afterSuccess: async () => {
       if (state.remoteEditor.path === targetPath) resetRemoteEditor();
-      await loadRemoteFiles(state.remoteFiles.cwd || "~", { force: true });
+      await loadRemoteFiles(getRemoteTreeRootPath() || state.remoteFiles.cwd || "~", { force: true });
       renderRemoteEditor();
     }
   });
@@ -2574,13 +4266,27 @@ function buildAuthHeaders() {
 function handleUploadFileChange() {
   state.uploadFile = nodes.uploadFile.files && nodes.uploadFile.files[0] ? nodes.uploadFile.files[0] : null;
   renderTransferHints();
+  if (!state.uploadFile) {
+    state.remoteUi.pendingUploadDir = "";
+    return;
+  }
+  if (state.remoteUi.pendingUploadDir) {
+    nodes.uploadRemotePath.value = ensureTrailingSlash(state.remoteUi.pendingUploadDir);
+    const targetDir = state.remoteUi.pendingUploadDir;
+    state.remoteUi.pendingUploadDir = "";
+    saveState();
+    void uploadFileToHosts();
+    setStatus(`状态：开始上传到 ${targetDir}`);
+  }
 }
 
 function updateBusyButtons() {
   const failedItems = state.results.filter((item) => !item.ok && !item.skipped);
   const timedOutItems = failedItems.filter((item) => item.timedOut);
+  const activeHost = getActiveHost();
   nodes.runBtn.disabled = state.running;
   nodes.testHostBtn.disabled = state.running;
+  if (nodes.keyWizardBtn) nodes.keyWizardBtn.disabled = state.running || state.transferRunning || state.keyRunning || !activeHost;
   nodes.uploadBtn.disabled = state.transferRunning;
   nodes.downloadBtn.disabled = state.transferRunning;
   nodes.loadPublicKeyBtn.disabled = state.keyRunning;
@@ -2594,17 +4300,22 @@ function updateBusyButtons() {
   nodes.exportFailedMdBtn.disabled = state.running || state.transferRunning || state.keyRunning || !failedItems.length;
   nodes.rerunFailedBtn.disabled = state.running || state.transferRunning || state.keyRunning || !failedItems.length || !state.lastReplay || state.lastReplay.actionName !== state.lastAction;
   nodes.rerunTimeoutBtn.disabled = state.running || state.transferRunning || state.keyRunning || !timedOutItems.length || !state.lastReplay || state.lastReplay.actionName !== state.lastAction;
-  nodes.runBtn.textContent = state.running ? "执行中..." : "执行到已选主机";
+  nodes.runBtn.textContent = state.running ? "执行中..." : (SIMPLE_MODE ? "执行" : "执行到已选主机");
   nodes.testHostBtn.textContent = state.running ? "测试中..." : "测试 SSH 连通性";
-  nodes.uploadBtn.textContent = state.transferRunning ? "上传中..." : "上传到已选主机";
+  nodes.uploadBtn.textContent = state.transferRunning ? "上传中..." : (SIMPLE_MODE ? "上传" : "上传到已选主机");
   nodes.downloadBtn.textContent = state.transferRunning ? "下载中..." : "从当前主机下载";
   nodes.loadPublicKeyBtn.textContent = state.keyRunning ? "读取中..." : "读取本机公钥";
   nodes.distributeKeyBtn.textContent = state.keyRunning ? "分发中..." : "分发到已选主机";
   nodes.checkHostKeyBtn.textContent = state.keyRunning ? "检测中..." : "检测当前主机是否已有这条公钥";
   nodes.distributeHostKeyBtn.textContent = state.keyRunning ? "写入中..." : "把上方公钥写入当前主机";
   nodes.distributeSelectedHostKeyBtn.textContent = state.keyRunning ? "写入中..." : "把上方公钥写入已选主机";
+  if (nodes.keyWizardApplyBtn) {
+    nodes.keyWizardApplyBtn.disabled = state.keyRunning;
+    nodes.keyWizardApplyBtn.textContent = state.keyRunning ? "处理中..." : "写入并切到私钥登录";
+  }
   nodes.rerunFailedBtn.textContent = state.running || state.transferRunning || state.keyRunning ? "重试中..." : "重新只执行失败主机";
   nodes.rerunTimeoutBtn.textContent = state.running || state.transferRunning || state.keyRunning ? "重试中..." : "只重试超时主机";
+  updateInteractiveTerminalUi();
 }
 
 function exportResults(type) {
@@ -2666,6 +4377,7 @@ function saveState() {
     runCommandTimeout: String(nodes.runCommandTimeout.value || ""),
     activeHostId: state.activeHostId,
     activeFilter: state.activeFilter,
+    sessionTabs: Array.isArray(state.sessionTabs) ? state.sessionTabs : [],
     selectedIds: Array.from(state.selectedIds)
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -2694,8 +4406,10 @@ function restoreState() {
     nodes.runCommandTimeout.value = String(saved.runCommandTimeout || "");
     state.activeHostId = String(saved.activeHostId || "");
     state.activeFilter = String(saved.activeFilter || "all");
+    state.sessionTabs = Array.isArray(saved.sessionTabs) ? saved.sessionTabs.map((item) => String(item || "")).filter(Boolean) : [];
     state.selectedIds = new Set(Array.isArray(saved.selectedIds) ? saved.selectedIds.map((item) => String(item || "")) : []);
   } catch (_error) {
+    state.sessionTabs = [];
     state.selectedIds = new Set();
   }
 }

@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenClaw Telegram Webhook 自检</title>
+    <link rel="stylesheet" href="./cloudflared.css" />
+    <link rel="stylesheet" href="./telegram-webhook.css" />
+  </head>
+  <body class="cloudflared-body">
+    <main class="page">
+      <header class="top">
+        <div>
+          <p class="tag">TELEGRAM WEBHOOK HEALTH</p>
+          <h1>Webhook 自检页</h1>
+          <p class="sub">查看 Telegram Webhook 当前配置、官方状态、代理转发计数与最近异常事件。</p>
+        </div>
+        <div class="top-actions">
+          <a class="header-link" href="./services.html">返回导航页</a>
+        </div>
+      </header>
+
+      <section class="hero-card">
+        <div class="hero-left">
+          <div class="hero-label">当前结论</div>
+          <div id="summary-badge" class="summary-badge">读取中...</div>
+          <div id="summary-text" class="summary-text">正在检查 Webhook 配置与 Telegram 官方状态。</div>
+        </div>
+        <div class="hero-actions">
+          <button id="refresh-btn" class="btn btn-primary" type="button">刷新状态</button>
+          <button id="self-test-btn" class="btn btn-warning" type="button">执行自检</button>
+          <button id="copy-btn" class="btn btn-ghost" type="button">复制结果</button>
+        </div>
+      </section>
+
+      <p id="status" class="status">状态：准备开始</p>
+
+      <section class="stats-grid">
+        <article class="stat-card">
+          <div class="stat-label">累计接收</div>
+          <div id="count-received" class="stat-value">0</div>
+          <div id="count-received-detail" class="stat-detail">来自 Telegram 的回调数量</div>
+        </article>
+        <article class="stat-card">
+          <div class="stat-label">累计转发成功</div>
+          <div id="count-forwarded" class="stat-value">0</div>
+          <div id="count-forwarded-detail" class="stat-detail">成功转发给 bridge 的数量</div>
+        </article>
+        <article class="stat-card">
+          <div class="stat-label">累计失败</div>
+          <div id="count-failed" class="stat-value">0</div>
+          <div id="count-failed-detail" class="stat-detail">代理转发错误或上游错误</div>
+        </article>
+        <article class="stat-card">
+          <div class="stat-label">密钥不匹配</div>
+          <div id="count-secret" class="stat-value">0</div>
+          <div id="count-secret-detail" class="stat-detail">secret_token 校验失败次数</div>
+        </article>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <div class="panel-head">
+            <h2>配置检查</h2>
+            <span class="panel-tip">bridge + 代理参数</span>
+          </div>
+          <dl id="config-kv" class="kv-list"></dl>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h2>最新时间戳</h2>
+            <span class="panel-tip">最近接收 / 成功 / 失败</span>
+          </div>
+          <dl id="latest-kv" class="kv-list"></dl>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Telegram 官方状态</h2>
+          <span class="panel-tip">`getWebhookInfo` 返回</span>
+        </div>
+        <dl id="telegram-kv" class="kv-list"></dl>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>检查告警</h2>
+          <span class="panel-tip">需优先处理的配置问题</span>
+        </div>
+        <div id="warning-list" class="list-block"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>最近回调事件</h2>
+          <span class="panel-tip">最多保留 50 条</span>
+        </div>
+        <div id="event-list" class="list-block"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>原始结果</h2>
+          <span class="panel-tip">排障时再看</span>
+        </div>
+        <pre id="raw-output" class="raw-output"></pre>
+      </section>
+    </main>
+
+    <script src="./telegram-webhook.js"></script>
+  </body>
+</html>

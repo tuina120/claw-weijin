@@ -2,6 +2,7 @@ const nodes = {
   refreshBtn: document.getElementById("refresh-btn"),
   repairBtn: document.getElementById("repair-btn"),
   restartBtn: document.getElementById("restart-btn"),
+  telegramTestBtn: document.getElementById("telegram-test-btn"),
   copyBtn: document.getElementById("copy-btn"),
   status: document.getElementById("status"),
   summaryBadge: document.getElementById("summary-badge"),
@@ -12,9 +13,13 @@ const nodes = {
   timerDetail: document.getElementById("timer-detail"),
   serviceStatus: document.getElementById("service-status"),
   serviceDetail: document.getElementById("service-detail"),
+  eventStatus: document.getElementById("event-status"),
+  eventDetail: document.getElementById("event-detail"),
   directKv: document.getElementById("direct-kv"),
   systemdList: document.getElementById("systemd-list"),
   overrideKv: document.getElementById("override-kv"),
+  eventKv: document.getElementById("event-kv"),
+  eventList: document.getElementById("event-list"),
   connectionsList: document.getElementById("connections-list"),
   logOutput: document.getElementById("log-output"),
   rawOutput: document.getElementById("raw-output")
@@ -29,6 +34,7 @@ function init() {
   nodes.refreshBtn.addEventListener("click", () => void loadGuardStatus());
   nodes.repairBtn.addEventListener("click", () => void runRepair());
   nodes.restartBtn.addEventListener("click", () => void restartTunnels());
+  if (nodes.telegramTestBtn) nodes.telegramTestBtn.addEventListener("click", () => void runTelegramTest());
   nodes.copyBtn.addEventListener("click", () => void copyResult());
   void loadGuardStatus();
 }
@@ -51,6 +57,8 @@ async function loadGuardStatus() {
     nodes.logOutput.textContent = "";
     nodes.directKv.innerHTML = "";
     nodes.overrideKv.innerHTML = "";
+    nodes.eventKv.innerHTML = "";
+    nodes.eventList.innerHTML = "";
     nodes.connectionsList.innerHTML = "";
     nodes.systemdList.innerHTML = "";
     setStatus(error.message || "读取失败", true);
@@ -99,6 +107,22 @@ async function restartTunnels() {
   }
 }
 
+async function runTelegramTest() {
+  if (nodes.telegramTestBtn) nodes.telegramTestBtn.disabled = true;
+  setStatus("正在发送 Telegram 测试告警...");
+  try {
+    const data = await apiPost("/api/cloudflared/telegram/test", {});
+    const sent = Number(data?.result?.sent || 0);
+    const failed = Number(data?.result?.failed || 0);
+    setStatus(`Telegram 测试完成：成功 ${sent}，失败 ${failed}`);
+    await loadGuardStatus();
+  } catch (error) {
+    setStatus(error.message || "Telegram 测试失败", true);
+  } finally {
+    if (nodes.telegramTestBtn) nodes.telegramTestBtn.disabled = false;
+  }
+}
+
 function renderSnapshot(data) {
   const summary = data?.summary || {};
   const mihomo = data?.mihomo || {};
@@ -106,6 +130,8 @@ function renderSnapshot(data) {
   const guardTimer = data?.guard?.timer || {};
   const guardService = data?.guard?.service || {};
   const override = data?.override || {};
+  const events = data?.events || {};
+  const telegramAlert = data?.alert?.telegram || {};
   const log = data?.log || {};
 
   nodes.summaryBadge.className = `summary-badge ${summary.tone || "warn"}`;
@@ -126,6 +152,10 @@ function renderSnapshot(data) {
     ? services.map((item) => `${item.unit}: ${item.activeState || "unknown"}`).join(" ｜ ")
     : "暂无服务信息";
 
+  nodes.eventStatus.textContent = events.healthLabel || (events.available ? "已读取" : "不可用");
+  const alertText = telegramAlert.enabled ? "Telegram 告警已启用" : `Telegram 告警未启用：${telegramAlert.reason || "未配置"}`;
+  nodes.eventDetail.textContent = [events.summary || "等待读取", alertText].filter(Boolean).join(" ｜ ");
+
   renderKv(nodes.directKv, [
     ["Mihomo socket", mihomo.socketPath || "-"],
     ["cloudflared 连接数", String(mihomo.count || 0)],
@@ -141,6 +171,24 @@ function renderSnapshot(data) {
     ["当前 profile", `${override.currentProfileId || "-"}${override.profileBound ? "（已绑定）" : "（未绑定）"}`],
     ["work 配置规则", buildPathState(override.workConfigPath, true, override.workRulesPresent)]
   ]);
+  renderKv(nodes.eventKv, [
+    ["最近 15 分钟掉线", String(events.dropCount15m ?? "-")],
+    ["最近 1 小时掉线", String(events.dropCount60m ?? "-")],
+    ["最近 24 小时掉线", String(events.dropCount24h ?? "-")],
+    ["最近 24 小时重试", String(events.retryCount24h ?? "-")],
+    ["最近 24 小时恢复", String(events.recoverCount24h ?? "-")],
+    ["自动恢复判定", formatBool(events.autoRecovered)],
+    ["最后掉线时间", formatDateTime(events.lastDropAt)],
+    ["最后恢复时间", formatDateTime(events.lastRecoverAt)],
+    ["Telegram 告警", telegramAlert.enabled ? "已启用" : "未启用"],
+    ["告警阈值", `连续 ${telegramAlert.consecutiveThreshold ?? "-"} 次异常`],
+    ["当前连续异常", String(telegramAlert.consecutiveUnhealthy ?? "-")],
+    ["Telegram 目标数", String(telegramAlert.chatCount ?? "-")],
+    ["最近告警发送", formatDateTime(telegramAlert.lastAlertAt)],
+    ["最近恢复通知", formatDateTime(telegramAlert.lastRecoveryAt)],
+    ["最近告警错误", telegramAlert.lastSendError || "-"]
+  ]);
+  renderEventList(events.recentEvents || []);
 
   nodes.logOutput.textContent = Array.isArray(log.lines) && log.lines.length ? log.lines.join("\n") : "暂无日志";
   nodes.rawOutput.textContent = JSON.stringify(data, null, 2);
@@ -195,6 +243,31 @@ function renderSystemd(services, guardService, guardTimer) {
     .join("");
 }
 
+function renderEventList(events) {
+  if (!Array.isArray(events) || !events.length) {
+    nodes.eventList.innerHTML = '<div class="muted-text">最近没有可展示的隧道事件。</div>';
+    return;
+  }
+  nodes.eventList.innerHTML = events
+    .map((item) => {
+      const type = String(item?.type || "").trim();
+      const tone = type === "drop" ? "danger" : type === "recover" ? "good" : "warn";
+      const typeLabel = type === "drop" ? "掉线" : type === "recover" ? "恢复" : "重试";
+      const message = String(item?.message || "").trim();
+      const compactMessage = message.length > 220 ? `${message.slice(0, 220)}...` : message;
+      return `
+        <article class="service-item">
+          <div class="item-head">
+            <div class="item-title">${escapeHtml(formatDateTime(item?.time))}</div>
+            <span class="pill ${tone}">${escapeHtml(typeLabel)}</span>
+          </div>
+          <div class="item-detail">${escapeHtml(compactMessage || "-")}</div>
+        </article>
+      `;
+    })
+    .join("");
+}
+
 function renderKv(root, rows) {
   root.innerHTML = "";
   rows.forEach(([label, value]) => {
@@ -231,12 +304,15 @@ function buildCopyText(data) {
   const mihomo = data?.mihomo || {};
   const timer = data?.guard?.timer || {};
   const services = Array.isArray(data?.services) ? data.services : [];
+  const telegramAlert = data?.alert?.telegram || {};
   return [
     `检测时间：${formatDateTime(data?.now)}`,
     `结论：${summary.label || "-"}`,
     `说明：${summary.detail || "-"}`,
     `DIRECT：${mihomo.allDirect ? "全部 DIRECT" : mihomo.hasCloudflaredConnections ? "存在非 DIRECT" : "暂无连接"}`,
     `Mihomo socket：${mihomo.socketPath || "-"}`,
+    `隧道健康：${data?.events?.healthLabel || "-"}（15分钟掉线 ${data?.events?.dropCount15m ?? "-"} 次，自动恢复 ${formatBool(data?.events?.autoRecovered)}）`,
+    `Telegram 告警：${telegramAlert.enabled ? "已启用" : "未启用"}（目标 ${telegramAlert.chatCount ?? "-"}，连续异常 ${telegramAlert.consecutiveUnhealthy ?? "-"} / ${telegramAlert.consecutiveThreshold ?? "-"}）`,
     `巡检 timer：${timer.activeState || "-"}`,
     `隧道服务：${services.map((item) => `${item.unit}=${item.activeState || "-"}`).join("; ") || "-"}`
   ].join("\n");

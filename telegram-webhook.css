@@ -1,0 +1,19 @@
+.kv-list {
+  grid-template-columns: 220px minmax(0, 1fr);
+}
+
+.warning-item {
+  border: 1px solid rgba(246, 195, 91, 0.35);
+  background: rgba(246, 195, 91, 0.12);
+}
+
+.ok-item {
+  border: 1px solid rgba(104, 211, 145, 0.35);
+  background: rgba(104, 211, 145, 0.14);
+}
+
+@media (max-width: 940px) {
+  .kv-list {
+    grid-template-columns: 1fr;
+  }
+}

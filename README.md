@@ -391,6 +391,23 @@ cd /home/weijin/codex/openclaw
   - 副本：`openclaw-cloudflared-b.service`
   - 启动：`systemctl --user enable --now openclaw-cloudflared-b.service`
 
+自动切线稳定建议（Clash/Mihomo 常见）：
+
+- 已内置巡检脚本 `scripts/ensure-cloudflared-direct.sh`，会自动写入直连规则：
+  - `cloudflared` 进程
+  - `model.baseUrl`（例如 `www.right.codes` / `api.openai.com`）
+  - `telegram.webhook.publicUrl` 对应域名
+  - `argotunnel.com / cfargotunnel.com`
+- 说明：`api.telegram.org` 默认不强制直连（在部分网络环境下直连会不稳定），沿用你现有的 Telegram 分流策略更稳。
+- 若你确认本地网络可直连 Telegram，才建议手动开启：
+  - `OPENCLAW_FORCE_DIRECT_TELEGRAM=1`
+- 一键开关（已提供脚本）：
+  - `./scripts/toggle-telegram-direct.sh on`
+  - `./scripts/toggle-telegram-direct.sh off`
+  - `./scripts/toggle-telegram-direct.sh status`
+- 如果后续新增模型供应商域名，可额外补充：
+  - `OPENCLAW_DIRECT_EXTRA_DOMAINS=api.openai.com,openrouter.ai,api.anthropic.com`
+
 当前推荐的 `~/.config/cloudflared/openclaw.yml` 关键项：
 
 ```yaml

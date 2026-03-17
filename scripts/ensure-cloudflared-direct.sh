@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+DIRECT_ENV_PATH="${OPENCLAW_DIRECT_ENV_PATH:-${HOME}/.config/openclaw/direct.env}"
+if [[ -f "${DIRECT_ENV_PATH}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${DIRECT_ENV_PATH}"
+  set +a
+fi
+
 MIHOMO_DIR="${HOME}/.config/mihomo-party"
 OVERRIDE_CONFIG="${MIHOMO_DIR}/override.yaml"
 OVERRIDE_DIR="${MIHOMO_DIR}/override"
@@ -11,8 +19,12 @@ LOG_FILE="${LOG_DIR}/cloudflared-direct-guard.log"
 OVERRIDE_ID="openclaw-cloudflared-direct"
 OVERRIDE_FILE="${OVERRIDE_DIR}/${OVERRIDE_ID}.yaml"
 SOCKET_GLOB="/tmp/mihomo-party-*.sock"
-RULE_1="  - PROCESS-NAME,cloudflared,🎯 全球直连"
-RULE_2="  - PROCESS-NAME-WILDCARD,cloudflared*,🎯 全球直连"
+DIRECT_POLICY_NAME="${OPENCLAW_DIRECT_POLICY_NAME:-🎯 全球直连}"
+BRIDGE_CONFIG="${OPENCLAW_BRIDGE_CONFIG:-$(cd "$(dirname "$0")/.." && pwd)/bridge.config.json}"
+EXTRA_DIRECT_DOMAINS="${OPENCLAW_DIRECT_EXTRA_DOMAINS:-}"
+FORCE_DIRECT_TELEGRAM="${OPENCLAW_FORCE_DIRECT_TELEGRAM:-0}"
+RULE_1="  - PROCESS-NAME,cloudflared,${DIRECT_POLICY_NAME}"
+RULE_2="  - PROCESS-NAME-WILDCARD,cloudflared*,${DIRECT_POLICY_NAME}"
 
 mkdir -p "${OVERRIDE_DIR}" "${LOG_DIR}"
 
@@ -21,11 +33,73 @@ log() {
 }
 
 write_override_file() {
-  cat >"${OVERRIDE_FILE}" <<'EOF'
-+rules:
-  - PROCESS-NAME,cloudflared,🎯 全球直连
-  - PROCESS-NAME-WILDCARD,cloudflared*,🎯 全球直连
-EOF
+  node <<'NODE'
+const fs = require('fs');
+const path = process.env.OVERRIDE_FILE;
+const bridgeConfigPath = process.env.BRIDGE_CONFIG;
+const extraDomainsRaw = process.env.EXTRA_DIRECT_DOMAINS || '';
+const policy = process.env.DIRECT_POLICY_NAME || '🎯 全球直连';
+const forceTelegram = String(process.env.FORCE_DIRECT_TELEGRAM || '').trim() === '1';
+
+function normalizeDomain(input) {
+  const raw = String(input || '').trim().toLowerCase().replace(/^\.+/, '').replace(/\.+$/, '');
+  if (!raw) return '';
+  if (raw === 'localhost') return '';
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(raw)) return '';
+  if (raw.includes(':')) return '';
+  if (!/^[a-z0-9.-]+$/.test(raw)) return '';
+  if (!raw.includes('.')) return '';
+  return raw;
+}
+
+function hostFromUrl(input) {
+  const value = String(input || '').trim();
+  if (!value) return '';
+  try {
+    return normalizeDomain(new URL(value).hostname || '');
+  } catch (_error) {
+    return '';
+  }
+}
+
+const domains = new Set(['argotunnel.com', 'cfargotunnel.com']);
+if (forceTelegram) domains.add('api.telegram.org');
+
+if (fs.existsSync(bridgeConfigPath)) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(bridgeConfigPath, 'utf8'));
+    const modelBaseUrl = raw?.model?.baseUrl;
+    const telegramApiBase = raw?.telegram?.apiBase;
+    const telegramWebhookPublicUrl = raw?.telegram?.webhook?.publicUrl;
+    [modelBaseUrl, telegramWebhookPublicUrl]
+      .map(hostFromUrl)
+      .filter(Boolean)
+      .forEach((item) => domains.add(item));
+    if (forceTelegram) {
+      const tgHost = hostFromUrl(telegramApiBase);
+      if (tgHost) domains.add(tgHost);
+    }
+  } catch (_error) {
+    // ignore parse errors
+  }
+}
+
+String(extraDomainsRaw)
+  .split(/[\s,\n]+/g)
+  .map(normalizeDomain)
+  .filter(Boolean)
+  .forEach((item) => domains.add(item));
+
+const rules = [
+  `  - PROCESS-NAME,cloudflared,${policy}`,
+  `  - PROCESS-NAME-WILDCARD,cloudflared*,${policy}`,
+  ...Array.from(domains)
+    .sort((a, b) => a.localeCompare(b))
+    .map((domain) => `  - DOMAIN-SUFFIX,${domain},${policy}`)
+];
+
+fs.writeFileSync(path, `+rules:\n${rules.join('\n')}\n`, 'utf8');
+NODE
 }
 
 ensure_override_registry() {
@@ -101,14 +175,71 @@ const fs = require('fs');
 const path = process.env.WORK_CONFIG;
 const rule1 = process.env.RULE_1;
 const rule2 = process.env.RULE_2;
+const overrideFile = process.env.OVERRIDE_FILE;
+const policy = process.env.DIRECT_POLICY_NAME || '🎯 全球直连';
 if (!fs.existsSync(path)) process.exit(0);
-let text = fs.readFileSync(path, 'utf8');
-if (!/^rules:\s*$/m.test(text)) process.exit(0);
-const has1 = text.includes(rule1);
-const has2 = text.includes(rule2);
-if (has1 && has2) process.exit(0);
-text = text.replace(/^rules:\s*$/m, `rules:\n${rule1}\n${rule2}`);
-fs.writeFileSync(path, text, 'utf8');
+const text = fs.readFileSync(path, 'utf8');
+const lines = text.split(/\r?\n/);
+const rulesIndex = lines.findIndex((line) => /^rules:\s*$/.test(line));
+if (rulesIndex < 0) process.exit(0);
+
+const desired = [rule1, rule2].filter(Boolean);
+if (overrideFile && fs.existsSync(overrideFile)) {
+  const overrideLines = fs
+    .readFileSync(overrideFile, 'utf8')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^-\s*DOMAIN-SUFFIX,[^,]+,/.test(line))
+    .map((line) => `  ${line}`);
+  overrideLines.forEach((line) => {
+    if (!desired.includes(line)) desired.push(line);
+  });
+}
+
+if (!desired.length) process.exit(0);
+const desiredSet = new Set(desired.map((line) => line.trim()));
+const desiredDomains = new Set(
+  desired
+    .map((line) => {
+      const m = line.trim().match(/^- DOMAIN-SUFFIX,([^,]+),/);
+      return m ? m[1].trim().toLowerCase() : '';
+    })
+    .filter(Boolean)
+);
+const cleanupDomains = new Set([...desiredDomains, 'api.telegram.org']);
+
+const kept = [];
+for (let i = 0; i < lines.length; i += 1) {
+  const line = lines[i];
+  if (i !== rulesIndex && desiredSet.has(line.trim())) continue;
+  if (i !== rulesIndex) {
+    const m = line.trim().match(/^- DOMAIN-SUFFIX,([^,]+),(.+)$/);
+    if (m) {
+      const domain = String(m[1] || '').trim().toLowerCase();
+      const targetPolicy = String(m[2] || '').trim();
+      if (cleanupDomains.has(domain) && targetPolicy === policy && !desiredDomains.has(domain)) {
+        continue;
+      }
+    }
+  }
+  kept.push(line);
+}
+
+const newLines = [];
+let inserted = false;
+for (let i = 0; i < kept.length; i += 1) {
+  const line = kept[i];
+  newLines.push(line);
+  if (!inserted && i === rulesIndex) {
+    desired.forEach((item) => newLines.push(item));
+    inserted = true;
+  }
+}
+
+const nextText = `${newLines.join('\n').replace(/\n{3,}/g, '\n\n')}\n`;
+if (nextText !== text) {
+  fs.writeFileSync(path, nextText, 'utf8');
+}
 NODE
 }
 
@@ -152,6 +283,7 @@ NODE
 
 main() {
   export OVERRIDE_CONFIG OVERRIDE_ID PROFILE_CONFIG WORK_CONFIG RULE_1 RULE_2
+  export OVERRIDE_FILE BRIDGE_CONFIG EXTRA_DIRECT_DOMAINS DIRECT_POLICY_NAME FORCE_DIRECT_TELEGRAM
   write_override_file
   ensure_override_registry
   ensure_profile_override

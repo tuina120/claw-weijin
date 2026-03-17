@@ -14,10 +14,20 @@
   },
   "telegram": {
     "enabled": true,
+    "mode": "webhook",
     "botToken": "$TG_BOT_TOKEN",
     "apiBase": "https://api.telegram.org",
     "pollTimeoutSec": 20,
     "pollIntervalMs": 1200,
+    "webhook": {
+      "enabled": true,
+      "publicUrl": "https://guest.qxyx.net/api/telegram/webhook",
+      "path": "/telegram/webhook",
+      "secretToken": "$TG_WEBHOOK_SECRET",
+      "dropPendingUpdates": false,
+      "listenHost": "127.0.0.1",
+      "listenPort": 4174
+    },
     "allowedChatIds": []
   }
 }
