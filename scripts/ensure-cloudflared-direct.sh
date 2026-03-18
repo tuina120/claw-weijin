@@ -244,7 +244,15 @@ NODE
 }
 
 find_socket() {
-  ls ${SOCKET_GLOB} 2>/dev/null | head -n 1 || true
+  local socket_path
+  while IFS= read -r socket_path; do
+    [[ -n "${socket_path}" ]] || continue
+    if curl --unix-socket "${socket_path}" -fsS http://localhost/connections >/dev/null 2>&1; then
+      echo "${socket_path}"
+      return 0
+    fi
+  done < <(ls -1t ${SOCKET_GLOB} 2>/dev/null || true)
+  return 0
 }
 
 reload_mihomo() {

@@ -11063,9 +11063,9 @@ function getCloudflaredGuardSnapshot() {
     label = "巡检 timer 未运行";
     detail = "cloudflared 当前可能可用，但定时巡检没有处于 active。";
   } else if (!directStatus.hasCloudflaredConnections) {
-    tone = "warn";
-    label = "暂无 cloudflared 连接";
-    detail = "未从 Mihomo 连接表看到 cloudflared，可能当前没有公网访问流量。";
+    tone = "good";
+    label = "隧道在线，等待流量检测";
+    detail = "cloudflared 服务已在线，但当前未从 Mihomo 连接表看到可用于校验的 cloudflared 流量。这通常表示当前没有公网访问，或当前网络环境不会把 cloudflared 进程流量记到 Mihomo 连接表。";
   }
   if (eventHealth.available) {
     if (eventHealth.dropCount15m > 0 && !eventHealth.autoRecovered) {
@@ -11205,11 +11205,23 @@ function normalizeSystemdTimestamp(value) {
 
 function findMihomoSocketPath() {
   if (!hasCommand("bash")) return "";
-  const result = spawnSync("bash", ["-lc", "ls -1t /tmp/mihomo-party-*.sock 2>/dev/null | head -n 1"], {
+  const result = spawnSync("bash", ["-lc", "ls -1t /tmp/mihomo-party-*.sock 2>/dev/null"], {
     encoding: "utf8"
   });
   if (result.status !== 0) return "";
-  return String(result.stdout || "").trim();
+  const candidates = String(result.stdout || "")
+    .split(/\r?\n/)
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  for (const socketPath of candidates) {
+    const probe = spawnSync("curl", ["--unix-socket", socketPath, "-fsS", "http://localhost/connections"], {
+      encoding: "utf8"
+    });
+    if (probe.status === 0) {
+      return socketPath;
+    }
+  }
+  return "";
 }
 
 function getCloudflaredDirectConnectionsStatus() {
@@ -11268,7 +11280,7 @@ function getCloudflaredDirectConnectionsStatus() {
   }
 
   const list = Array.isArray(data.connections) ? data.connections : [];
-  const cloudflared = list.filter((item) => String(item?.metadata?.process || "").trim() === "cloudflared");
+  const cloudflared = list.filter((item) => String(item?.metadata?.process || "").trim().toLowerCase().includes("cloudflared"));
   const connections = cloudflared.map((item) => {
     const chains = Array.isArray(item?.chains) ? item.chains.map((value) => String(value || "")) : [];
     return {
