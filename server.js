@@ -134,6 +134,9 @@ const cloudflaredTelegramAlertConsecutiveThreshold = clampInt(
   1,
   120
 );
+const runtimeCache = new Map();
+const serviceStatusCacheTtlMs = 2000;
+const commandCheckCacheTtlMs = 60 * 1000;
 const terminalToken = String(process.env.OPENCLAW_TERMINAL_TOKEN || process.env.TERMINAL_TOKEN || "").trim();
 const terminalOutputLimit = 200000;
 const terminalTimeoutMs = 12000;
@@ -801,6 +804,10 @@ const server = http.createServer(async (req, res) => {
     await handleGetServicesDashboard(req, res);
     return;
   }
+  if (method === "GET" && cleanPath === "/api/services/links") {
+    await handleGetServicesLinks(req, res);
+    return;
+  }
   if (method === "GET" && cleanPath === "/api/services/logs") {
     await handleGetServiceLogs(req, res);
     return;
@@ -1387,6 +1394,14 @@ async function handleGetServicesDashboard(req, res) {
     sendJson(res, 200, getServicesDashboardSnapshot(req));
   } catch (error) {
     sendJson(res, 500, { error: error.message || "读取服务导航状态失败" });
+  }
+}
+
+async function handleGetServicesLinks(req, res) {
+  try {
+    sendJson(res, 200, getServicesLinksSnapshot(req));
+  } catch (error) {
+    sendJson(res, 500, { error: error.message || "读取服务导航入口失败" });
   }
 }
 
@@ -10742,7 +10757,7 @@ async function buildTelegramWebhookHealthSnapshot(req) {
   };
 }
 
-function getServicesDashboardSnapshot(req) {
+function getServicesLinkContext(req) {
   const localOrigin127 = `http://127.0.0.1:${port}`;
   const localOriginLocalhost = `http://localhost:${port}`;
   const currentOrigin = getRequestOrigin(req);
@@ -10754,15 +10769,125 @@ function getServicesDashboardSnapshot(req) {
   const appOrigin = currentIsLocal ? localOrigin127 : publicOrigin || normalizedCurrentOrigin || localOrigin127;
   const appLinkKind = currentIsLocal ? "local" : "public";
   const fileOrigin = fileManagerPublicOrigin || "";
+  const fileEntryOrigin = fileOrigin || "https://file.qxyx.net";
   const vpnOrigin = fileOrigin || appOrigin;
   const vpnLinkKind = fileOrigin ? "public" : appLinkKind;
   const guestOrigin = guestPublicOrigin || "";
+
+  const groups = [
+    {
+      id: "main",
+      title: "常用入口",
+      items: [
+        makeDashboardLink("对话页", `${appOrigin}/chat.html`, "最常用的对话入口", appLinkKind),
+        makeDashboardLink("服务导航", `${appOrigin}/services.html`, "统一查看所有服务入口和状态", appLinkKind),
+        makeDashboardLink("配置台", `${appOrigin}/index.html`, "模型与接入配置", appLinkKind),
+        makeDashboardLink("codex模型", `${appOrigin}/model-api.html`, "快速接入 Base URL + API Key", appLinkKind),
+        makeDashboardLink("SSH工具", `${appOrigin}/ssh.html`, "批量管理 VPS", appLinkKind),
+        makeDashboardLink("网页终端", `${appOrigin}/terminal.html`, "网页命令行终端", appLinkKind),
+        webIdePublicOrigin
+          ? makeDashboardLink("Web IDE", webIdePublicOrigin, "公网版 Web IDE / code-server", "public", { featured: true })
+          : makeDashboardLink("Web IDE", "http://127.0.0.1:18080", "网页版 VS Code，仅本机直接访问", "local", { featured: true })
+      ]
+    },
+    {
+      id: "ops",
+      title: "运维与排查",
+      items: [
+        makeDashboardLink("节点转换器", `${vpnOrigin}/vpn-convert.html`, "订阅链接、原始节点转 Clash / Base64", vpnLinkKind),
+        makeDashboardLink("订阅管理", `${vpnOrigin}/vpn-subscriptions.html`, "批量管理常用订阅链接", vpnLinkKind),
+        makeDashboardLink("隧道巡检", `${appOrigin}/cloudflared.html`, "检查 cloudflared 是否 DIRECT", appLinkKind),
+        makeDashboardLink("Webhook 自检", `${appOrigin}/telegram-webhook.html`, "检查 Telegram Webhook 连通性与回调统计", appLinkKind),
+        makeDashboardLink("网络检测", `${appOrigin}/network.html`, "判断访问链路更像国内还是国外", appLinkKind),
+        makeDashboardLink("管理员", `${appOrigin}/admin.html`, "访客链接与管理入口", appLinkKind),
+        makeDashboardLink("文件管理", `${fileEntryOrigin}/`, "统一文件入口（https://file.qxyx.net/*）", "public"),
+        makeDashboardLink("上传中心", `${fileEntryOrigin}/`, "统一文件入口（https://file.qxyx.net/*）", "public")
+      ]
+    },
+    {
+      id: "public",
+      title: "公网入口",
+      items: [
+        publicOrigin ? makeDashboardLink("主站公网", publicOrigin, "Cloudflare Tunnel 主入口", "public") : null,
+        webIdePublicOrigin ? makeDashboardLink("Web IDE 公网", webIdePublicOrigin, "code-server 公网入口", "public", { featured: true }) : null,
+        fileOrigin ? makeDashboardLink("文件公网", fileOrigin, "公开下载与文件入口", "public") : null,
+        guestOrigin ? makeDashboardLink("访客入口", guestOrigin, "体验链接与访客页", "public") : null
+      ].filter(Boolean)
+    },
+    currentIsLocal
+      ? {
+      id: "compat",
+      title: "本机专用",
+      items: [
+        makeDashboardLink("Web IDE", "http://127.0.0.1:18080", "网页版 VS Code，仅本机直接访问", "local"),
+        makeDashboardLink("127.0.0.1 访问", `${localOrigin127}/services.html`, "本机回环地址", "local"),
+        makeDashboardLink("localhost 访问", `${localOriginLocalhost}/services.html`, "同机浏览器也可用 localhost 访问", "local"),
+        currentOrigin ? makeDashboardLink("当前访问源", `${currentOrigin.replace(/\/+$/, "")}/services.html`, "当前浏览器访问本页的源地址", "current") : null
+      ].filter(Boolean)
+      }
+      : {
+      id: "compat",
+      title: "本机专用",
+      items: [
+        makeDashboardLink("Web IDE", "http://127.0.0.1:18080", "这个地址仅在家里这台机器本机浏览器可直接打开", "local"),
+        makeDashboardLink("127.0.0.1 访问", `${localOrigin127}/services.html`, "仅本机可访问，不适合远程点击", "local"),
+        makeDashboardLink("localhost 访问", `${localOriginLocalhost}/services.html`, "仅本机可访问，不适合远程点击", "local"),
+        currentOrigin ? makeDashboardLink("当前访问源", `${currentOrigin.replace(/\/+$/, "")}/services.html`, "当前浏览器访问本页的源地址", "current") : null
+      ].filter(Boolean)
+      }
+  ];
+
+  return {
+    now: new Date().toISOString(),
+    origins: {
+      local127: localOrigin127,
+      localhost: localOriginLocalhost,
+      current: currentOrigin,
+      public: publicOrigin,
+      webIdePublic: webIdePublicOrigin,
+      file: fileOrigin,
+      guest: guestOrigin
+    },
+    groups
+  };
+}
+
+function getServicesLinksSnapshot(req) {
+  const base = getServicesLinkContext(req);
+  return {
+    ok: true,
+    now: base.now,
+    summary: {
+      tone: "warn",
+      label: "入口已就绪",
+      detail: "常用入口已加载，服务状态正在后台刷新。"
+    },
+    origins: base.origins,
+    services: [],
+    groups: base.groups,
+    cloudflared: {
+      label: "加载中",
+      detail: "正在读取 cloudflared 与 systemd 状态。",
+      allDirect: false,
+      count: 0,
+      timerHealthy: false
+    }
+  };
+}
+
+function getServicesDashboardSnapshot(req) {
+  const base = getServicesLinkContext(req);
   const webStatus = getSystemdUserUnitStatus(webServiceName);
   const webIdeStatus = getSystemdUserUnitStatus(webIdeServiceName);
   const bridgeStatus = getBridgeServiceStatus();
   const tunnelServices = cloudflaredServiceNames.map((unit) => getSystemdUserUnitStatus(unit));
   const tunnelTimer = getSystemdUserTimerStatus(cloudflaredGuardTimerName);
-  const cloudflared = getCloudflaredGuardSnapshot();
+  const guardService = getSystemdUserUnitStatus(cloudflaredGuardServiceName);
+  const cloudflared = getCloudflaredGuardSnapshot({
+    services: tunnelServices,
+    guardService,
+    guardTimer: tunnelTimer
+  });
 
   const services = [
     toDashboardServiceItem({
@@ -10804,69 +10929,6 @@ function getServicesDashboardSnapshot(req) {
     })
   ];
 
-  const groups = [
-    {
-      id: "main",
-      title: "常用入口",
-      items: [
-        makeDashboardLink("对话页", `${appOrigin}/chat.html`, "最常用的对话入口", appLinkKind),
-        makeDashboardLink("服务导航", `${appOrigin}/services.html`, "统一查看所有服务入口和状态", appLinkKind),
-        makeDashboardLink("配置台", `${appOrigin}/index.html`, "模型与接入配置", appLinkKind),
-        makeDashboardLink("codex模型", `${appOrigin}/model-api.html`, "快速接入 Base URL + API Key", appLinkKind),
-        makeDashboardLink("SSH工具", `${appOrigin}/ssh.html`, "批量管理 VPS", appLinkKind),
-        makeDashboardLink("网页终端", `${appOrigin}/terminal.html`, "网页命令行终端", appLinkKind),
-        webIdePublicOrigin
-          ? makeDashboardLink("Web IDE", webIdePublicOrigin, "公网版 Web IDE / code-server", "public", { featured: true })
-          : makeDashboardLink("Web IDE", "http://127.0.0.1:18080", "网页版 VS Code，仅本机直接访问", "local", { featured: true })
-      ]
-    },
-    {
-      id: "ops",
-      title: "运维与排查",
-      items: [
-        makeDashboardLink("节点转换器", `${vpnOrigin}/vpn-convert.html`, "订阅链接、原始节点转 Clash / Base64", vpnLinkKind),
-        makeDashboardLink("订阅管理", `${vpnOrigin}/vpn-subscriptions.html`, "批量管理常用订阅链接", vpnLinkKind),
-        makeDashboardLink("隧道巡检", `${appOrigin}/cloudflared.html`, "检查 cloudflared 是否 DIRECT", appLinkKind),
-        makeDashboardLink("Webhook 自检", `${appOrigin}/telegram-webhook.html`, "检查 Telegram Webhook 连通性与回调统计", appLinkKind),
-        makeDashboardLink("网络检测", `${appOrigin}/network.html`, "判断访问链路更像国内还是国外", appLinkKind),
-        makeDashboardLink("管理员", `${appOrigin}/admin.html`, "访客链接与管理入口", appLinkKind),
-        makeDashboardLink("文件管理", `${appOrigin}/files.html`, "文件上传下载与预览", appLinkKind),
-        makeDashboardLink("上传中心", `${appOrigin}/uploads.html`, "批量上传页", appLinkKind)
-      ]
-    },
-    {
-      id: "public",
-      title: "公网入口",
-      items: [
-        publicOrigin ? makeDashboardLink("主站公网", publicOrigin, "Cloudflare Tunnel 主入口", "public") : null,
-        webIdePublicOrigin ? makeDashboardLink("Web IDE 公网", webIdePublicOrigin, "code-server 公网入口", "public", { featured: true }) : null,
-        fileOrigin ? makeDashboardLink("文件公网", fileOrigin, "公开下载与文件入口", "public") : null,
-        guestOrigin ? makeDashboardLink("访客入口", guestOrigin, "体验链接与访客页", "public") : null
-      ].filter(Boolean)
-    },
-    currentIsLocal
-      ? {
-      id: "compat",
-      title: "本机专用",
-      items: [
-        makeDashboardLink("Web IDE", "http://127.0.0.1:18080", "网页版 VS Code，仅本机直接访问", "local"),
-        makeDashboardLink("127.0.0.1 访问", `${localOrigin127}/services.html`, "本机回环地址", "local"),
-        makeDashboardLink("localhost 访问", `${localOriginLocalhost}/services.html`, "同机浏览器也可用 localhost 访问", "local"),
-        currentOrigin ? makeDashboardLink("当前访问源", `${currentOrigin.replace(/\/+$/, "")}/services.html`, "当前浏览器访问本页的源地址", "current") : null
-      ].filter(Boolean)
-      }
-      : {
-      id: "compat",
-      title: "本机专用",
-      items: [
-        makeDashboardLink("Web IDE", "http://127.0.0.1:18080", "这个地址仅在家里这台机器本机浏览器可直接打开", "local"),
-        makeDashboardLink("127.0.0.1 访问", `${localOrigin127}/services.html`, "仅本机可访问，不适合远程点击", "local"),
-        makeDashboardLink("localhost 访问", `${localOriginLocalhost}/services.html`, "仅本机可访问，不适合远程点击", "local"),
-        currentOrigin ? makeDashboardLink("当前访问源", `${currentOrigin.replace(/\/+$/, "")}/services.html`, "当前浏览器访问本页的源地址", "current") : null
-      ].filter(Boolean)
-      }
-  ];
-
   const onlineCount = services.filter((item) => item.ok).length;
   const totalCount = services.length;
   const summaryTone = cloudflared?.summary?.tone === "danger" || onlineCount < totalCount ? "warn" : "good";
@@ -10879,17 +10941,9 @@ function getServicesDashboardSnapshot(req) {
       label: summaryTone === "good" ? "主要服务运行正常" : "部分服务需要留意",
       detail: `共 ${totalCount} 个关键服务，当前在线 ${onlineCount} 个。cloudflared 状态：${cloudflared?.summary?.label || "未知"}。`
     },
-    origins: {
-      local127: localOrigin127,
-      localhost: localOriginLocalhost,
-      current: currentOrigin,
-      public: publicOrigin,
-      webIdePublic: webIdePublicOrigin,
-      file: fileOrigin,
-      guest: guestOrigin
-    },
+    origins: base.origins,
     services,
-    groups,
+    groups: base.groups,
     cloudflared: {
       label: cloudflared?.summary?.label || "",
       detail: cloudflared?.summary?.detail || "",
@@ -11004,6 +11058,17 @@ function deriveSiblingOrigin(originText, fromPrefix, toPrefix) {
   }
 }
 
+function getRuntimeCachedValue(cacheKey, ttlMs, loader) {
+  const now = Date.now();
+  const cached = runtimeCache.get(cacheKey);
+  if (cached && now - cached.ts < ttlMs) {
+    return cached.value;
+  }
+  const value = loader();
+  runtimeCache.set(cacheKey, { ts: now, value });
+  return value;
+}
+
 function deriveWebIdePublicOrigin(req) {
   const explicit = normalizeOptionalOrigin(String(process.env.OPENCLAW_WEB_IDE_PUBLIC_ORIGIN || "").trim());
   if (explicit) return explicit;
@@ -11032,75 +11097,83 @@ function isLocalHostName(hostname) {
   return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
 }
 
-function getCloudflaredGuardSnapshot() {
-  const services = cloudflaredServiceNames.map((unit) => getSystemdUserUnitStatus(unit));
-  const guardService = getSystemdUserUnitStatus(cloudflaredGuardServiceName);
-  const guardTimer = getSystemdUserTimerStatus(cloudflaredGuardTimerName);
-  const directStatus = getCloudflaredDirectConnectionsStatus();
-  const overrideStatus = getCloudflaredOverrideStatus();
-  const log = readCloudflaredGuardLogTail(40);
-  const eventHealth = getCloudflaredTunnelEventHealth();
-  const activeTunnelCount = services.filter((item) => item.active).length;
+function getCloudflaredGuardSnapshot(preloaded = null) {
+  const buildSnapshot = () => {
+    const services =
+      Array.isArray(preloaded?.services) && preloaded.services.length
+        ? preloaded.services
+        : cloudflaredServiceNames.map((unit) => getSystemdUserUnitStatus(unit));
+    const guardService = preloaded?.guardService || getSystemdUserUnitStatus(cloudflaredGuardServiceName);
+    const guardTimer = preloaded?.guardTimer || getSystemdUserTimerStatus(cloudflaredGuardTimerName);
+    const directStatus = getCloudflaredDirectConnectionsStatus();
+    const overrideStatus = getCloudflaredOverrideStatus();
+    const log = readCloudflaredGuardLogTail(40);
+    const eventHealth = getCloudflaredTunnelEventHealth();
+    const activeTunnelCount = services.filter((item) => item.active).length;
 
-  let tone = "warn";
-  let label = "待确认";
-  let detail = "请先查看隧道、定时器和 Mihomo 连接状态。";
+    let tone = "warn";
+    let label = "待确认";
+    let detail = "请先查看隧道、定时器和 Mihomo 连接状态。";
 
-  if (directStatus.allDirect && activeTunnelCount === services.length && guardTimer.active) {
-    tone = "good";
-    label = "cloudflared 直连正常";
-    detail = "当前已确认 cloudflared 连接走 DIRECT，巡检 timer 也在运行。";
-  } else if (activeTunnelCount !== services.length) {
-    tone = "danger";
-    label = "隧道未全部在线";
-    detail = "至少有一个 cloudflared 服务未处于 active，建议先执行修复。";
-  } else if (directStatus.hasCloudflaredConnections && !directStatus.allDirect) {
-    tone = "danger";
-    label = "cloudflared 未完全直连";
-    detail = "Mihomo 已检测到 cloudflared 连接，但其中至少一条没有走 DIRECT。";
-  } else if (!guardTimer.active) {
-    tone = "warn";
-    label = "巡检 timer 未运行";
-    detail = "cloudflared 当前可能可用，但定时巡检没有处于 active。";
-  } else if (!directStatus.hasCloudflaredConnections) {
-    tone = "good";
-    label = "隧道在线，等待流量检测";
-    detail = "cloudflared 服务已在线，但当前未从 Mihomo 连接表看到可用于校验的 cloudflared 流量。这通常表示当前没有公网访问，或当前网络环境不会把 cloudflared 进程流量记到 Mihomo 连接表。";
-  }
-  if (eventHealth.available) {
-    if (eventHealth.dropCount15m > 0 && !eventHealth.autoRecovered) {
+    if (directStatus.allDirect && activeTunnelCount === services.length && guardTimer.active) {
+      tone = "good";
+      label = "cloudflared 直连正常";
+      detail = "当前已确认 cloudflared 连接走 DIRECT，巡检 timer 也在运行。";
+    } else if (activeTunnelCount !== services.length) {
       tone = "danger";
-      label = "隧道最近有掉线且未恢复";
-      detail = `最近 15 分钟掉线 ${eventHealth.dropCount15m} 次，最近 1 小时掉线 ${eventHealth.dropCount60m} 次。`;
-    } else if (eventHealth.dropCount60m > 0) {
-      if (tone === "good") tone = "warn";
-      detail = `${detail} 最近 1 小时掉线 ${eventHealth.dropCount60m} 次，已自动恢复。`;
+      label = "隧道未全部在线";
+      detail = "至少有一个 cloudflared 服务未处于 active，建议先执行修复。";
+    } else if (directStatus.hasCloudflaredConnections && !directStatus.allDirect) {
+      tone = "danger";
+      label = "cloudflared 未完全直连";
+      detail = "Mihomo 已检测到 cloudflared 连接，但其中至少一条没有走 DIRECT。";
+    } else if (!guardTimer.active) {
+      tone = "warn";
+      label = "巡检 timer 未运行";
+      detail = "cloudflared 当前可能可用，但定时巡检没有处于 active。";
+    } else if (!directStatus.hasCloudflaredConnections) {
+      tone = "good";
+      label = "隧道在线，等待流量检测";
+      detail = "cloudflared 服务已在线，但当前未从 Mihomo 连接表看到可用于校验的 cloudflared 流量。这通常表示当前没有公网访问，或当前网络环境不会把 cloudflared 进程流量记到 Mihomo 连接表。";
     }
-  }
+    if (eventHealth.available) {
+      if (eventHealth.dropCount15m > 0 && !eventHealth.autoRecovered) {
+        tone = "danger";
+        label = "隧道最近有掉线且未恢复";
+        detail = `最近 15 分钟掉线 ${eventHealth.dropCount15m} 次，最近 1 小时掉线 ${eventHealth.dropCount60m} 次。`;
+      } else if (eventHealth.dropCount60m > 0) {
+        if (tone === "good") tone = "warn";
+        detail = `${detail} 最近 1 小时掉线 ${eventHealth.dropCount60m} 次，已自动恢复。`;
+      }
+    }
 
-  return {
-    ok: true,
-    now: new Date().toISOString(),
-    summary: {
-      tone,
-      label,
-      detail
-    },
-    services,
-    guard: {
-      service: guardService,
-      timer: guardTimer,
-      scriptPath: cloudflaredGuardScriptPath,
-      logPath: cloudflaredGuardLogPath
-    },
-    alert: {
-      telegram: getCloudflaredTelegramAlertPublicState()
-    },
-    events: eventHealth,
-    mihomo: directStatus,
-    override: overrideStatus,
-    log
+    return {
+      ok: true,
+      now: new Date().toISOString(),
+      summary: {
+        tone,
+        label,
+        detail
+      },
+      services,
+      guard: {
+        service: guardService,
+        timer: guardTimer,
+        scriptPath: cloudflaredGuardScriptPath,
+        logPath: cloudflaredGuardLogPath
+      },
+      alert: {
+        telegram: getCloudflaredTelegramAlertPublicState()
+      },
+      events: eventHealth,
+      mihomo: directStatus,
+      override: overrideStatus,
+      log
+    };
   };
+
+  if (preloaded) return buildSnapshot();
+  return getRuntimeCachedValue("cloudflared-guard-snapshot", serviceStatusCacheTtlMs, buildSnapshot);
 }
 
 function getSystemdUserUnitStatus(unitName) {
@@ -11114,71 +11187,76 @@ function getSystemdUserUnitStatus(unitName) {
       message: "缺少 unit 名称"
     };
   }
-  if (!hasCommand("systemctl")) {
-    return {
-      available: false,
+
+  return getRuntimeCachedValue(`systemd-unit:${unit}`, serviceStatusCacheTtlMs, () => {
+    if (!hasCommand("systemctl")) {
+      return {
+        available: false,
+        unit,
+        active: false,
+        enabled: false,
+        message: "systemctl 不可用"
+      };
+    }
+
+    const showResult = runSystemctlUser([
+      "show",
       unit,
-      active: false,
-      enabled: false,
-      message: "systemctl 不可用"
+      "--property=Id,Description,LoadState,ActiveState,SubState,UnitFileState,Result,FragmentPath,StateChangeTimestamp,ExecMainCode,ExecMainStatus"
+    ]);
+    const statusResult = runSystemctlUser(["status", unit, "--no-pager", "--lines=8"]);
+    const showMap = parseSystemdShowOutput(showResult.stdout);
+    const unitFileState = String(showMap.UnitFileState || "").trim();
+    const activeState = String(showMap.ActiveState || "").trim();
+    const result = String(showMap.Result || "").trim();
+    const oneshotReady = unit.endsWith(".service") && unitFileState === "static" && activeState === "inactive" && result === "success";
+    const healthy = activeState === "active" || oneshotReady;
+
+    return {
+      available: showResult.ok || statusResult.ok,
+      unit,
+      description: String(showMap.Description || "").trim(),
+      loadState: String(showMap.LoadState || "").trim() || "unknown",
+      activeState: activeState || "inactive",
+      subState: String(showMap.SubState || "").trim(),
+      unitFileState,
+      enabled: unitFileState === "enabled",
+      active: activeState === "active",
+      healthy,
+      healthLabel: activeState === "active" ? "运行中" : oneshotReady ? "待命" : activeState || "unknown",
+      result,
+      fragmentPath: String(showMap.FragmentPath || "").trim(),
+      stateChangedAt: normalizeSystemdTimestamp(showMap.StateChangeTimestamp),
+      execMainCode: String(showMap.ExecMainCode || "").trim(),
+      execMainStatus: String(showMap.ExecMainStatus || "").trim(),
+      statusText: (statusResult.stdout || statusResult.stderr || showResult.stderr || "").trim(),
+      error: showResult.ok ? "" : showResult.stderr || ""
     };
-  }
-
-  const showResult = runSystemctlUser([
-    "show",
-    unit,
-    "--property=Id,Description,LoadState,ActiveState,SubState,UnitFileState,Result,FragmentPath,StateChangeTimestamp,ExecMainCode,ExecMainStatus"
-  ]);
-  const statusResult = runSystemctlUser(["status", unit, "--no-pager", "--lines=8"]);
-  const showMap = parseSystemdShowOutput(showResult.stdout);
-  const unitFileState = String(showMap.UnitFileState || "").trim();
-  const activeState = String(showMap.ActiveState || "").trim();
-  const result = String(showMap.Result || "").trim();
-  const oneshotReady = unit.endsWith(".service") && unitFileState === "static" && activeState === "inactive" && result === "success";
-  const healthy = activeState === "active" || oneshotReady;
-
-  return {
-    available: showResult.ok || statusResult.ok,
-    unit,
-    description: String(showMap.Description || "").trim(),
-    loadState: String(showMap.LoadState || "").trim() || "unknown",
-    activeState: activeState || "inactive",
-    subState: String(showMap.SubState || "").trim(),
-    unitFileState,
-    enabled: unitFileState === "enabled",
-    active: activeState === "active",
-    healthy,
-    healthLabel: activeState === "active" ? "运行中" : oneshotReady ? "待命" : activeState || "unknown",
-    result,
-    fragmentPath: String(showMap.FragmentPath || "").trim(),
-    stateChangedAt: normalizeSystemdTimestamp(showMap.StateChangeTimestamp),
-    execMainCode: String(showMap.ExecMainCode || "").trim(),
-    execMainStatus: String(showMap.ExecMainStatus || "").trim(),
-    statusText: (statusResult.stdout || statusResult.stderr || showResult.stderr || "").trim(),
-    error: showResult.ok ? "" : showResult.stderr || ""
-  };
+  });
 }
 
 function getSystemdUserTimerStatus(unitName) {
-  const status = getSystemdUserUnitStatus(unitName);
-  if (!status.available || !hasCommand("systemctl")) {
-    return status;
-  }
+  return getRuntimeCachedValue(`systemd-timer:${unitName}`, serviceStatusCacheTtlMs, () => {
+    const status = getSystemdUserUnitStatus(unitName);
+    if (!status.available || !hasCommand("systemctl")) {
+      return status;
+    }
 
-  const showResult = runSystemctlUser([
-    "show",
-    unitName,
-    "--property=NextElapseUSecRealtime,LastTriggerUSec,Triggers,TriggeredBy"
-  ]);
-  const showMap = parseSystemdShowOutput(showResult.stdout);
+    const showResult = runSystemctlUser([
+      "show",
+      unitName,
+      "--property=NextElapseUSecRealtime,LastTriggerUSec,Triggers,TriggeredBy"
+    ]);
+    const showMap = parseSystemdShowOutput(showResult.stdout);
 
-  return {
-    ...status,
-    nextRunAt: normalizeSystemdTimestamp(showMap.NextElapseUSecRealtime),
-    lastRunAt: normalizeSystemdTimestamp(showMap.LastTriggerUSec),
-    triggers: String(showMap.Triggers || "").trim(),
-    triggeredBy: String(showMap.TriggeredBy || "").trim()
-  };
+    return {
+      ...status,
+      nextRunAt: normalizeSystemdTimestamp(showMap.NextElapseUSecRealtime),
+      lastRunAt: normalizeSystemdTimestamp(showMap.LastTriggerUSec),
+      triggers: String(showMap.Triggers || "").trim(),
+      triggeredBy: String(showMap.TriggeredBy || "").trim()
+    };
+  });
 }
 
 function parseSystemdShowOutput(text) {
@@ -11780,39 +11858,34 @@ function restartCloudflaredServices() {
 }
 
 function getBridgeServiceStatus() {
-  if (!hasCommand("systemctl")) {
+  return getRuntimeCachedValue(`bridge-status:${bridgeServiceName}`, serviceStatusCacheTtlMs, () => {
+    if (!hasCommand("systemctl")) {
+      return {
+        available: false,
+        active: false,
+        enabled: false,
+        unit: bridgeServiceName,
+        message: "systemctl 不可用"
+      };
+    }
+
+    const status = getSystemdUserUnitStatus(bridgeServiceName);
     return {
-      available: false,
-      active: false,
-      enabled: false,
-      unit: bridgeServiceName,
-      message: "systemctl 不可用"
+      ...status,
+      available: true,
+      activeRaw: status.activeState || status.error || "",
+      enabledRaw: status.unitFileState || ""
     };
-  }
-
-  const activeResult = runSystemctlUser(["is-active", bridgeServiceName]);
-  const enabledResult = runSystemctlUser(["is-enabled", bridgeServiceName]);
-  const statusResult = runSystemctlUser(["status", bridgeServiceName, "--no-pager", "--lines=8"]);
-
-  return {
-    available: true,
-    active: activeResult.stdout === "active",
-    healthy: activeResult.stdout === "active",
-    enabled: enabledResult.stdout === "enabled",
-    activeState: activeResult.stdout || "inactive",
-    healthLabel: activeResult.stdout === "active" ? "运行中" : activeResult.stdout || "inactive",
-    unit: bridgeServiceName,
-    statusText: (statusResult.stdout || statusResult.stderr || "").trim(),
-    activeRaw: activeResult.stdout || activeResult.stderr || "",
-    enabledRaw: enabledResult.stdout || enabledResult.stderr || ""
-  };
+  });
 }
 
 function hasCommand(command) {
-  const result = spawnSync("bash", ["-lc", `command -v ${command}`], {
-    stdio: "ignore"
+  return getRuntimeCachedValue(`has-command:${command}`, commandCheckCacheTtlMs, () => {
+    const result = spawnSync("bash", ["-lc", `command -v ${command}`], {
+      stdio: "ignore"
+    });
+    return result.status === 0;
   });
-  return result.status === 0;
 }
 
 function runSystemctlUser(args) {
@@ -11827,7 +11900,25 @@ function runSystemctlUser(args) {
   };
 }
 
+function prewarmDashboardCaches() {
+  try {
+    hasCommand("systemctl");
+    getSystemdUserUnitStatus(webServiceName);
+    getSystemdUserUnitStatus(webIdeServiceName);
+    getBridgeServiceStatus();
+    cloudflaredServiceNames.forEach((unit) => getSystemdUserUnitStatus(unit));
+    getSystemdUserUnitStatus(cloudflaredGuardServiceName);
+    getSystemdUserTimerStatus(cloudflaredGuardTimerName);
+    getCloudflaredGuardSnapshot();
+  } catch (_error) {
+    // 预热失败不影响主服务
+  }
+}
+
 server.listen(port, host, () => {
   // eslint-disable-next-line no-console
   console.log(`OpenClaw 模型配置台已启动：http://localhost:${port} (bind ${host})`);
+  setTimeout(() => {
+    prewarmDashboardCaches();
+  }, 300);
 });

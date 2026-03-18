@@ -1,5 +1,7 @@
 const FAVORITES_KEY = "openclaw-service-favorites";
 const COLLAPSE_KEY = "openclaw-service-collapsed-groups";
+const DASHBOARD_SNAPSHOT_KEY = "openclaw-service-dashboard-snapshot";
+const DASHBOARD_SNAPSHOT_MAX_AGE_MS = 10 * 60 * 1000;
 
 const nodes = {
   refreshBtn: document.getElementById("refresh-btn"),
@@ -50,18 +52,56 @@ function init() {
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") closeLogsModal();
   });
-  void loadDashboard();
+  renderLoadingShell();
+  hydrateDashboardFromCache();
+  requestAnimationFrame(() => {
+    void loadDashboard();
+  });
 }
 
 async function loadDashboard() {
-  setStatus("正在读取服务导航数据...");
+  setStatus(latestData ? "正在刷新服务导航数据..." : "正在读取服务导航数据...");
+  await Promise.allSettled([loadDashboardLinks(), loadDashboardStatus()]);
+}
+
+async function loadDashboardLinks() {
+  try {
+    const data = await apiGet("/api/services/links");
+    const hasFreshStatus = Array.isArray(latestData?.services) && latestData.services.length > 0;
+    const merged = mergeDashboardData(data);
+    if (hasFreshStatus) {
+      merged.summary = latestData.summary || merged.summary;
+      merged.cloudflared = latestData.cloudflared || merged.cloudflared;
+      merged.services = latestData.services || merged.services;
+    }
+    latestData = merged;
+    latestCopyText = buildCopyText(merged);
+    renderDashboard(merged);
+    if (!hasFreshStatus) {
+      setStatus("常用入口已就绪，正在刷新服务状态...");
+    }
+  } catch (error) {
+    if (!latestData) {
+      setStatus(error.message || "入口加载失败", true);
+    }
+  }
+}
+
+async function loadDashboardStatus() {
   try {
     const data = await apiGet("/api/services/dashboard");
-    latestData = data;
-    latestCopyText = buildCopyText(data);
-    renderDashboard(data);
-    setStatus(`读取完成：${data?.summary?.label || "已完成"}`);
+    latestData = mergeDashboardData(data);
+    latestCopyText = buildCopyText(latestData);
+    saveDashboardSnapshot(latestData);
+    renderDashboard(latestData);
+    setStatus(`读取完成：${latestData?.summary?.label || "已完成"}`);
   } catch (error) {
+    if (latestData) {
+      nodes.summaryText.textContent = `${error.message || "刷新失败"}，当前先显示最近一次成功结果。`;
+      nodes.rawOutput.textContent = `${String(error.stack || error.message || error)}\n\n${nodes.rawOutput.textContent || ""}`.trim();
+      setStatus(error.message || "刷新失败，已保留最近结果", true);
+      return;
+    }
     latestData = null;
     latestCopyText = "";
     nodes.summaryBadge.className = "summary-badge danger";
@@ -73,6 +113,115 @@ async function loadDashboard() {
     nodes.rawOutput.textContent = String(error.stack || error.message || error);
     setStatus(error.message || "读取失败", true);
   }
+}
+
+function renderLoadingShell() {
+  if (!nodes.spotlightGrid.innerHTML.trim()) {
+    nodes.spotlightGrid.innerHTML = Array.from({ length: 4 }, () => `
+      <article class="spotlight-card">
+        <div class="spotlight-top">
+          <div class="spotlight-mark">...</div>
+          <span class="pill neutral">加载中</span>
+        </div>
+        <div class="spotlight-title">正在准备常用入口</div>
+        <div class="spotlight-desc">页面已经打开，正在后台读取最新状态。</div>
+      </article>
+    `).join("");
+  }
+  if (!nodes.serviceGrid.innerHTML.trim()) {
+    nodes.serviceGrid.innerHTML = Array.from({ length: 3 }, () => `
+      <article class="service-item">
+        <div class="card-head">
+          <div>
+            <div class="card-title">正在读取服务状态</div>
+            <div class="link-url">systemd --user</div>
+          </div>
+          <span class="pill neutral">加载中</span>
+        </div>
+        <div class="service-detail">页面内容会先显示，状态随后补齐。</div>
+      </article>
+    `).join("");
+  }
+  if (!nodes.groupsRoot.innerHTML.trim()) {
+    nodes.groupsRoot.innerHTML = `
+      <section class="panel group-panel">
+        <div class="group-head">
+          <div class="group-head-main">
+            <button class="collapse-btn" type="button" disabled>准备中</button>
+            <div>
+              <div class="group-tag">loading</div>
+              <h2 class="group-title">入口列表加载中</h2>
+            </div>
+          </div>
+          <span class="panel-tip">请稍候</span>
+        </div>
+        <div class="link-grid">
+          <article class="link-card">
+            <div class="card-head">
+              <div class="card-title">正在整理入口</div>
+              <span class="pill neutral">加载中</span>
+            </div>
+            <div class="link-desc">会优先展示最近一次成功结果，然后再刷新最新状态。</div>
+          </article>
+        </div>
+      </section>
+    `;
+  }
+}
+
+function hydrateDashboardFromCache() {
+  const cached = loadDashboardSnapshot();
+  if (!cached) return;
+  latestData = cached;
+  latestCopyText = buildCopyText(cached);
+  renderDashboard(cached);
+  setStatus("已显示最近一次结果，正在刷新最新状态...");
+}
+
+function loadDashboardSnapshot() {
+  try {
+    const raw = localStorage.getItem(DASHBOARD_SNAPSHOT_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (!parsed || typeof parsed !== "object") return null;
+    const savedAt = Number(parsed.savedAt || 0);
+    if (!savedAt || Date.now() - savedAt > DASHBOARD_SNAPSHOT_MAX_AGE_MS) return null;
+    return parsed.data && typeof parsed.data === "object" ? parsed.data : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function saveDashboardSnapshot(data) {
+  try {
+    localStorage.setItem(DASHBOARD_SNAPSHOT_KEY, JSON.stringify({
+      savedAt: Date.now(),
+      data
+    }));
+  } catch (_error) {}
+}
+
+function mergeDashboardData(incoming) {
+  const current = latestData && typeof latestData === "object" ? latestData : {};
+  const next = incoming && typeof incoming === "object" ? incoming : {};
+  const nextServices = Array.isArray(next.services) && next.services.length ? next.services : Array.isArray(current.services) ? current.services : [];
+  const nextGroups = Array.isArray(next.groups) && next.groups.length ? next.groups : Array.isArray(current.groups) ? current.groups : [];
+  const nextCloudflared =
+    next.cloudflared && typeof next.cloudflared === "object"
+      ? { ...(current.cloudflared || {}), ...next.cloudflared }
+      : (current.cloudflared || {});
+  const nextOrigins =
+    next.origins && typeof next.origins === "object"
+      ? { ...(current.origins || {}), ...next.origins }
+      : (current.origins || {});
+  return {
+    ...current,
+    ...next,
+    summary: next.summary || current.summary || {},
+    origins: nextOrigins,
+    services: nextServices,
+    groups: nextGroups,
+    cloudflared: nextCloudflared
+  };
 }
 
 function renderDashboard(data) {
