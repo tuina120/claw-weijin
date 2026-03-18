@@ -16,7 +16,7 @@ usage() {
 
 示例:
   ./scripts/build-ubuntu-deb.sh
-  ./scripts/build-ubuntu-deb.sh -v 1.0.1
+  ./scripts/build-ubuntu-deb.sh -v 1.0.2
   ./scripts/build-ubuntu-deb.sh -o /tmp/dist
 EOF
 }
